@@ -1,0 +1,38 @@
+# Copy this file to terraform.tfvars and fill in your values.
+# terraform.tfvars is gitignored and must NOT be committed.
+
+aws_region   = "us-east-1"
+project_name = "library" # short — feeds AWS names with a 32-char limit
+environment  = "production"
+
+# Domain the frontend is served from (via CloudFront). The API is served from
+# "<api_subdomain>.<domain>" (default api.<domain>).
+domain        = "library.example.com"
+api_subdomain = "api"
+
+# The Route53 hosted zone that serves `domain`. If `domain` is a subdomain
+# (library.example.com) served by the example.com zone, set this to the zone:
+route53_zone_name = "example.com"
+# If `domain` is itself the zone apex, leave route53_zone_name = "".
+
+# Set true only if Terraform should CREATE the hosted zone (then delegate your
+# registrar's NS records to it). Usually false — you already have the zone.
+create_hosted_zone = false
+
+# GitHub repo whose Actions OIDC tokens may assume the deploy role.
+github_repo = "your-github-org/neighborhood-library"
+
+# Set false if the GitHub OIDC provider already exists in this AWS account
+# (only one provider for token.actions.githubusercontent.com is allowed).
+create_github_oidc_provider = true
+
+# --- Optional sizing / cost knobs (defaults shown, all overridable) ---
+# db_instance_class       = "db.t4g.micro"
+# redis_node_type         = "cache.t4g.micro"
+# rds_multi_az            = false
+# rds_deletion_protection = true
+# nat_gateway_count       = 1
+# api_desired_count       = 2
+# api_min_count           = 1
+# api_max_count           = 4
+# worker_desired_count    = 1

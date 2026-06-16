@@ -1,0 +1,82 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+eggs/
+parts/
+var/
+sdist/
+develop-eggs/
+.installed.cfg
+lib/
+lib64/
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+.env/
+
+# uv
+.uv-cache/
+# uv.lock is intentionally tracked
+
+# Environment files — DO NOT COMMIT
+.env
+.env.*
+!.env.template
+
+# Test artifacts
+.pytest_cache/
+.coverage
+coverage.xml
+htmlcov/
+.hypothesis/
+junit.xml
+
+# Type checking and linting
+.mypy_cache/
+.ruff_cache/
+
+# Logs
+*.log
+logs/
+celerybeat-schedule
+celerybeat.pid
+
+# Jupyter
+.ipynb_checkpoints
+
+# Terraform state — DO NOT COMMIT (contains secrets). Patterns cover the
+# root stack, terraform/bootstrap/, and every module subdirectory.
+terraform/**/.terraform/
+terraform/**/.terraform.lock.hcl
+terraform/**/*.tfstate
+terraform/**/*.tfstate.*
+terraform/**/*.tfvars
+!terraform/**/*.tfvars.example
+terraform/**/backend.tf
+!terraform/**/backend.tf.example
+
+# Local archive of the removed Hostinger/VPS deployment — DO NOT COMMIT
+_archive_hostinger/
+
+# Next.js frontend build output (static export)
+frontend/out/
+frontend/.next/
+
+# OS and editor
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.swo
+*.swn
+*~
+Thumbs.db

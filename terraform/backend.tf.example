@@ -1,0 +1,20 @@
+# Remote state backend (recommended for teams / CI).
+#
+# The state bucket + lock table are created ONCE by terraform/bootstrap/ (see
+# terraform/bootstrap/README.md). After that, copy this file to backend.tf,
+# fill in the bucket/table names that bootstrap printed, and run:
+#
+#     terraform init    # migrates local state into S3
+#
+# terraform {
+#   backend "s3" {
+#     bucket         = "library-tfstate-<account-id>"
+#     key            = "neighborhood-library/production/terraform.tfstate"
+#     region         = "us-east-1"
+#     encrypt        = true
+#     dynamodb_table = "library-tfstate-lock"
+#   }
+# }
+#
+# Local state (no backend.tf) is fine for a single operator — state lives in
+# terraform.tfstate (gitignored). Use the S3 backend for shared/CI use.

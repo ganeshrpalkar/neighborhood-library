@@ -1,0 +1,253 @@
+name: Deploy
+
+on:
+  push:
+    branches: [main, staging, production]
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "Target environment"
+        required: true
+        type: choice
+        options: [staging, production]
+      skip_tests:
+        description: "Skip tests (emergency deploys only)"
+        required: false
+        type: boolean
+        default: false
+
+concurrency:
+  group: deploy-${{ github.ref_name }}
+  cancel-in-progress: false # never cancel a deploy in progress
+
+# OIDC: the workflow assumes the AWS deploy role; no long-lived AWS keys.
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  # ─────────────────────────────────────────────────────────────
+  # Resolve environment from branch or manual input
+  # ─────────────────────────────────────────────────────────────
+  setup:
+    name: Setup
+    runs-on: ubuntu-latest
+    outputs:
+      environment: ${{ steps.resolve.outputs.environment }}
+      image_tag: ${{ steps.resolve.outputs.image_tag }}
+    steps:
+      - name: Resolve environment
+        id: resolve
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            ENV="${{ inputs.environment }}"
+          elif [ "${{ github.ref_name }}" = "production" ]; then
+            ENV="production"
+          else
+            ENV="staging"
+          fi
+          echo "environment=$ENV" >> "$GITHUB_OUTPUT"
+          echo "image_tag=${{ github.sha }}" >> "$GITHUB_OUTPUT"
+
+  # ─────────────────────────────────────────────────────────────
+  # Unit + property + smoke tests gate
+  # ─────────────────────────────────────────────────────────────
+  test:
+    name: Tests
+    runs-on: ubuntu-latest
+    if: ${{ !inputs.skip_tests }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v3
+        with:
+          version: "latest"
+
+      - name: Install dependencies
+        run: uv sync
+
+      - name: Run unit & smoke tests
+        run: |
+          uv run pytest tests/unit/ tests/properties/ tests/test_startup_smoke.py \
+            -v --tb=short -q
+        env:
+          PYTHONPATH: .
+          ENVIRONMENT: local
+
+  # ─────────────────────────────────────────────────────────────
+  # Build and push API + worker images to ECR
+  # ─────────────────────────────────────────────────────────────
+  build-push:
+    name: Build & Push to ECR
+    runs-on: ubuntu-latest
+    needs: [setup, test]
+    if: always() && needs.setup.result == 'success' && (needs.test.result == 'success' || needs.test.result == 'skipped')
+    outputs:
+      api_image: ${{ steps.refs.outputs.api_image }}
+      worker_image: ${{ steps.refs.outputs.worker_image }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Log in to Amazon ECR
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Compute image refs
+        id: refs
+        run: |
+          echo "api_image=${{ vars.ECR_API_REPO }}:${{ needs.setup.outputs.image_tag }}" >> "$GITHUB_OUTPUT"
+          echo "worker_image=${{ vars.ECR_WORKER_REPO }}:${{ needs.setup.outputs.image_tag }}" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and push API image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: Dockerfile
+          platforms: linux/amd64
+          push: true
+          tags: |
+            ${{ vars.ECR_API_REPO }}:${{ needs.setup.outputs.image_tag }}
+            ${{ vars.ECR_API_REPO }}:${{ needs.setup.outputs.environment }}-latest
+          cache-from: type=gha,scope=api
+          cache-to: type=gha,mode=max,scope=api
+
+      - name: Build and push Celery worker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: Dockerfile.worker
+          platforms: linux/amd64
+          push: true
+          tags: |
+            ${{ vars.ECR_WORKER_REPO }}:${{ needs.setup.outputs.image_tag }}
+            ${{ vars.ECR_WORKER_REPO }}:${{ needs.setup.outputs.environment }}-latest
+          cache-from: type=gha,scope=worker
+          cache-to: type=gha,mode=max,scope=worker
+
+  # ─────────────────────────────────────────────────────────────
+  # Backend: register new task defs, run migrations on the new image,
+  # then roll the ECS services.
+  # ─────────────────────────────────────────────────────────────
+  deploy-backend:
+    name: Deploy backend (${{ needs.setup.outputs.environment }})
+    runs-on: ubuntu-latest
+    needs: [setup, build-push]
+    environment: ${{ needs.setup.outputs.environment }}
+    steps:
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      # Register a new API task-def revision pointing at the freshly-pushed image.
+      - name: Register API task definition
+        id: api_taskdef
+        run: |
+          ARN=$(aws ecs describe-task-definition \
+                  --task-definition "${{ vars.API_TASK_DEF_FAMILY }}" \
+                  --query taskDefinition \
+                | jq --arg IMG "${{ needs.build-push.outputs.api_image }}" '
+                    .containerDefinitions |= map(if .name=="api" then .image=$IMG else . end)
+                    | del(.taskDefinitionArn,.revision,.status,.requiresAttributes,
+                          .compatibilities,.registeredAt,.registeredBy)
+                  ' > api-taskdef.json
+                  aws ecs register-task-definition --cli-input-json file://api-taskdef.json \
+                    --query 'taskDefinition.taskDefinitionArn' --output text)
+          echo "arn=$ARN" >> "$GITHUB_OUTPUT"
+          echo "Registered $ARN"
+
+      # Migrations run on the NEW image, before the service rolls.
+      - name: Run database migrations (one-off ECS task)
+        run: |
+          TASK_ARN=$(aws ecs run-task \
+            --cluster "${{ vars.ECS_CLUSTER }}" \
+            --task-definition "${{ steps.api_taskdef.outputs.arn }}" \
+            --launch-type FARGATE \
+            --network-configuration "awsvpcConfiguration={subnets=[${{ vars.ECS_SUBNETS }}],securityGroups=[${{ vars.ECS_SECURITY_GROUP }}],assignPublicIp=DISABLED}" \
+            --overrides '{"containerOverrides":[{"name":"api","command":["alembic","upgrade","head"]}]}' \
+            --query 'tasks[0].taskArn' --output text)
+          echo "Migration task: $TASK_ARN"
+          aws ecs wait tasks-stopped --cluster "${{ vars.ECS_CLUSTER }}" --tasks "$TASK_ARN"
+          EXIT=$(aws ecs describe-tasks --cluster "${{ vars.ECS_CLUSTER }}" --tasks "$TASK_ARN" \
+                  --query 'tasks[0].containers[?name==`api`].exitCode | [0]' --output text)
+          echo "Migration exit code: $EXIT"
+          if [ "$EXIT" != "0" ]; then
+            echo "::error::Database migration failed (exit $EXIT)"; exit 1
+          fi
+
+      - name: Deploy API service
+        run: |
+          aws ecs update-service \
+            --cluster "${{ vars.ECS_CLUSTER }}" \
+            --service "${{ vars.ECS_API_SERVICE }}" \
+            --task-definition "${{ steps.api_taskdef.outputs.arn }}"
+          aws ecs wait services-stable \
+            --cluster "${{ vars.ECS_CLUSTER }}" --services "${{ vars.ECS_API_SERVICE }}"
+
+      - name: Deploy worker service
+        run: |
+          ARN=$(aws ecs describe-task-definition \
+                  --task-definition "${{ vars.WORKER_TASK_DEF_FAMILY }}" \
+                  --query taskDefinition \
+                | jq --arg IMG "${{ needs.build-push.outputs.worker_image }}" '
+                    .containerDefinitions |= map(if .name=="worker" then .image=$IMG else . end)
+                    | del(.taskDefinitionArn,.revision,.status,.requiresAttributes,
+                          .compatibilities,.registeredAt,.registeredBy)
+                  ' > worker-taskdef.json
+                  aws ecs register-task-definition --cli-input-json file://worker-taskdef.json \
+                    --query 'taskDefinition.taskDefinitionArn' --output text)
+          aws ecs update-service \
+            --cluster "${{ vars.ECS_CLUSTER }}" \
+            --service "${{ vars.ECS_WORKER_SERVICE }}" \
+            --task-definition "$ARN"
+          aws ecs wait services-stable \
+            --cluster "${{ vars.ECS_CLUSTER }}" --services "${{ vars.ECS_WORKER_SERVICE }}"
+
+  # ─────────────────────────────────────────────────────────────
+  # Frontend: static export → S3, then invalidate CloudFront
+  # ─────────────────────────────────────────────────────────────
+  deploy-frontend:
+    name: Deploy frontend (${{ needs.setup.outputs.environment }})
+    runs-on: ubuntu-latest
+    needs: [setup, build-push]
+    environment: ${{ needs.setup.outputs.environment }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Build static export
+        working-directory: frontend
+        run: |
+          npm ci
+          npm run build
+        env:
+          NEXT_PUBLIC_API_URL: ${{ vars.NEXT_PUBLIC_API_URL }}
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Sync to S3
+        run: aws s3 sync frontend/out "s3://${{ vars.FRONTEND_BUCKET }}" --delete
+
+      - name: Invalidate CloudFront
+        run: |
+          aws cloudfront create-invalidation \
+            --distribution-id "${{ vars.CLOUDFRONT_DISTRIBUTION_ID }}" \
+            --paths "/*"
