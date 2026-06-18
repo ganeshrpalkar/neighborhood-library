@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.api.v1.auth.models import User
@@ -16,7 +17,7 @@ def get_by_email(db: Session, email: str) -> User | None:
 
 def register_user(db: Session, email: str, password: str, name: str | None) -> User:
     if get_by_email(db, email) is not None:
-        raise ConflictError("A user with this email already exists")
+        raise ConflictError("A user with this email already exists") from None
     user = User(
         email=email,
         name=name or "",
@@ -24,7 +25,11 @@ def register_user(db: Session, email: str, password: str, name: str | None) -> U
         roles=["staff"],
     )
     db.add(user)
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        raise ConflictError("A user with this email already exists") from None
     db.refresh(user)
     return user
 

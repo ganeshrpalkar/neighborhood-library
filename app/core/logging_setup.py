@@ -23,7 +23,7 @@ class LoggingContext:
     _organization_name: ContextVar[str] = ContextVar("organization_name", default="")
     _user: ContextVar[str] = ContextVar("user", default="Anonymous")
     _error_occurred: ContextVar[bool] = ContextVar("error_occurred", default=False)
-    _trace_buffer: ContextVar[list] = ContextVar("trace_buffer", default=[])
+    _trace_buffer: ContextVar[list | None] = ContextVar("trace_buffer", default=None)
 
     @classmethod
     def set_correlation_id(cls, correlation_id: str) -> None:

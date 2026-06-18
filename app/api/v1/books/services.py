@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from sqlalchemy import func, or_, select
+from sqlalchemy import ColumnElement, func, or_, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.api.v1.books.models import Book
@@ -14,7 +15,7 @@ def list_books(db: Session, page: int = 1, page_size: int = 12, search: str | No
     if search:
         q = search.strip()
         like = f"%{q}%"
-        conds = [Book.title.ilike(like), Book.author.ilike(like), Book.isbn.ilike(like)]
+        conds: list[ColumnElement[bool]] = [Book.title.ilike(like), Book.author.ilike(like), Book.isbn.ilike(like)]
         if len(q) >= 4:  # trigram fuzzy for longer queries (typo tolerance)
             conds += [func.word_similarity(q, Book.title) > 0.45, func.word_similarity(q, Book.author) > 0.45]
         stmt = stmt.where(or_(*conds))
@@ -32,7 +33,7 @@ def autocomplete_books(db: Session, q: str, limit: int = 8) -> list[Book]:
     # word_similarity(query, text) compares the query against the closest *word* in the
     # text, so a typo like "tolkein" still matches the author "J.R.R. Tolkien".
     score = func.greatest(func.word_similarity(q, Book.title), func.word_similarity(q, Book.author))
-    conds = [Book.title.ilike(like), Book.author.ilike(like), Book.isbn.ilike(like)]
+    conds: list[ColumnElement[bool]] = [Book.title.ilike(like), Book.author.ilike(like), Book.isbn.ilike(like)]
     if len(q) >= 4:  # fuzzy only for longer queries — short prefixes use substring match
         conds += [func.word_similarity(q, Book.title) > 0.45, func.word_similarity(q, Book.author) > 0.45]
     stmt = select(Book).where(or_(*conds)).order_by(score.desc(), Book.title.asc()).limit(limit)
@@ -49,7 +50,7 @@ def get_book(db: Session, book_id: int) -> Book:
 def create_book(db: Session, data: dict) -> Book:
     isbn = data.get("isbn")
     if isbn and db.scalar(select(Book).where(Book.isbn == isbn)) is not None:
-        raise ConflictError(f"A book with ISBN '{isbn}' already exists")
+        raise ConflictError(f"A book with ISBN '{isbn}' already exists") from None
     total = data.get("total_copies", 1)
     book = Book(
         title=data["title"],
@@ -62,7 +63,11 @@ def create_book(db: Session, data: dict) -> Book:
         available_copies=total,
     )
     db.add(book)
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        raise ConflictError(f"A book with ISBN '{isbn}' already exists") from None
     db.refresh(book)
     return book
 
@@ -76,7 +81,7 @@ def update_book(db: Session, book_id: int, data: dict) -> Book:
         and new_isbn != book.isbn
         and db.scalar(select(Book).where(Book.isbn == new_isbn)) is not None
     ):
-        raise ConflictError(f"A book with ISBN '{new_isbn}' already exists")
+        raise ConflictError(f"A book with ISBN '{new_isbn}' already exists") from None
 
     if "total_copies" in data and data["total_copies"] is not None:
         delta = data["total_copies"] - book.total_copies
@@ -89,7 +94,11 @@ def update_book(db: Session, book_id: int, data: dict) -> Book:
         if field in data and data[field] is not None:
             setattr(book, field, data[field])
 
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        raise ConflictError(f"A book with ISBN '{new_isbn}' already exists") from None
     db.refresh(book)
     return book
 

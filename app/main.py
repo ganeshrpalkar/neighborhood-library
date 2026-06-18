@@ -2,10 +2,11 @@
 
 import logging
 from contextlib import asynccontextmanager
+from typing import cast
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 
 from app.api.v1.router import api_router
 from app.core.config import settings
@@ -83,7 +84,11 @@ def create_app() -> FastAPI:
 
         limiter.enabled = settings.RATE_LIMIT_ENABLED
         app.state.limiter = limiter
-        app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
+        def _rate_limit_handler(request: Request, exc: Exception) -> Response:
+            return _rate_limit_exceeded_handler(request, cast(RateLimitExceeded, exc))
+
+        app.add_exception_handler(RateLimitExceeded, _rate_limit_handler)
     except ImportError:
         pass
 

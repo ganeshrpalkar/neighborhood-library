@@ -1,6 +1,9 @@
 """Health endpoint tests."""
 
+import pytest
 from fastapi.testclient import TestClient
+
+pytestmark = pytest.mark.contract
 
 
 def test_health_returns_json(test_client: TestClient):

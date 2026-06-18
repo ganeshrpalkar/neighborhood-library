@@ -10,6 +10,7 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, selectinload
 
 from app.api.v1.books.models import Book
@@ -67,14 +68,16 @@ def get_loan(db: Session, loan_id: int) -> Loan:
 
 
 def borrow_book(db: Session, book_id: int, member_id: int, due_date: datetime | None = None) -> Loan:
-    book = db.get(Book, book_id)
+    # FOR UPDATE locks the book row so concurrent borrows queue behind this
+    # transaction instead of racing past the availability check.
+    book = db.scalars(select(Book).where(Book.id == book_id).with_for_update()).first()
     if book is None:
         raise NotFoundError(f"Book {book_id} not found")
     member = db.get(Member, member_id)
     if member is None:
         raise NotFoundError(f"Member {member_id} not found")
     if book.available_copies < 1:
-        raise ConflictError(f"'{book.title}' has no available copies")
+        raise ConflictError(f"'{book.title}' has no available copies") from None
 
     book.available_copies -= 1
     loan = Loan(
@@ -85,15 +88,23 @@ def borrow_book(db: Session, book_id: int, member_id: int, due_date: datetime | 
         fine_amount=0,
     )
     db.add(loan)
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        raise ConflictError(f"'{book.title}' has no available copies") from None
     db.refresh(loan)
     return loan
 
 
 def return_loan(db: Session, loan_id: int) -> Loan:
-    loan = get_loan(db, loan_id)
+    # Lock the loan row first so concurrent return requests queue rather than
+    # both passing the returned_at check and double-incrementing available_copies.
+    loan = db.scalars(select(Loan).where(Loan.id == loan_id).with_for_update()).first()
+    if loan is None:
+        raise NotFoundError(f"Loan {loan_id} not found")
     if loan.returned_at is not None:
-        raise ConflictError("This loan has already been returned")
+        raise ConflictError("This loan has already been returned") from None
 
     now = _now()
     overdue_days = (now - loan.due_date).days if loan.due_date else 0
@@ -101,11 +112,16 @@ def return_loan(db: Session, loan_id: int) -> Loan:
     loan.status = "returned"
     loan.fine_amount = round(max(0, overdue_days) * settings.FINE_PER_DAY, 2)
 
-    book = db.get(Book, loan.book_id)
+    # Lock the book row too — we're mutating available_copies.
+    book = db.scalars(select(Book).where(Book.id == loan.book_id).with_for_update()).first()
     if book is not None:
         book.available_copies = min(book.total_copies, book.available_copies + 1)
 
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        raise ConflictError("This loan has already been returned") from None
     db.refresh(loan)
     return loan
 
