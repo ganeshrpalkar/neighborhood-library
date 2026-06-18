@@ -6,7 +6,7 @@ import uuid
 
 import pytest
 
-pytestmark = [pytest.mark.contract, pytest.mark.mutation]
+pytestmark = pytest.mark.contract
 
 
 def _unique(prefix: str) -> str:

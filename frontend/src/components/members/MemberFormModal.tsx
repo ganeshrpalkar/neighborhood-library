@@ -6,6 +6,13 @@ import { Modal } from "@/components/ui/Modal";
 import { Input, Textarea } from "@/components/ui/Input";
 import { Button } from "@/components/ui/Button";
 import { createMember, updateMember, errorMessage } from "@/lib/api";
+import {
+  collectErrors,
+  email as validateEmail,
+  isValid,
+  required,
+  type Errors,
+} from "@/lib/validation";
 import type { Member, MemberInput } from "@/lib/types";
 
 interface Props {
@@ -17,13 +24,17 @@ interface Props {
 
 const empty = { name: "", email: "", phone: "", address: "" };
 
+type FormErrors = Errors<"name" | "email">;
+
 export function MemberFormModal({ open, onClose, onSaved, member }: Props) {
   const [form, setForm] = useState(empty);
+  const [errors, setErrors] = useState<FormErrors>({});
   const [loading, setLoading] = useState(false);
   const editing = !!member;
 
   useEffect(() => {
     if (open) {
+      setErrors({});
       setForm(
         member
           ? {
@@ -39,10 +50,21 @@ export function MemberFormModal({ open, onClose, onSaved, member }: Props) {
 
   function set<K extends keyof typeof form>(key: K, val: string) {
     setForm((f) => ({ ...f, [key]: val }));
+    setErrors((e) => (e[key as keyof FormErrors] ? { ...e, [key]: undefined } : e));
+  }
+
+  function validate(): FormErrors {
+    return collectErrors<"name" | "email">({
+      name: required(form.name, "Name"),
+      email: validateEmail(form.email),
+    });
   }
 
   async function onSubmit(e: React.FormEvent) {
     e.preventDefault();
+    const found = validate();
+    setErrors(found);
+    if (!isValid(found)) return;
     setLoading(true);
     try {
       const payload: MemberInput = {
@@ -74,11 +96,12 @@ export function MemberFormModal({ open, onClose, onSaved, member }: Props) {
       onClose={onClose}
       title={editing ? "Edit member" : "Add member"}
     >
-      <form onSubmit={onSubmit} className="space-y-4">
+      <form onSubmit={onSubmit} className="space-y-4" noValidate>
         <Input
           label="Name"
           value={form.name}
           onChange={(e) => set("name", e.target.value)}
+          error={errors.name}
           required
           placeholder="Ada Lovelace"
         />
@@ -87,6 +110,7 @@ export function MemberFormModal({ open, onClose, onSaved, member }: Props) {
           type="email"
           value={form.email}
           onChange={(e) => set("email", e.target.value)}
+          error={errors.email}
           required
           placeholder="ada@example.com"
         />

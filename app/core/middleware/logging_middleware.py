@@ -24,10 +24,7 @@ def trim_data(data, max_length: int = 300):
     if data is None:
         return None
     try:
-        if isinstance(data, (dict, list)):
-            data_str = json.dumps(data, separators=(",", ":"), default=str)
-        else:
-            data_str = str(data)
+        data_str = json.dumps(data, separators=(",", ":"), default=str) if isinstance(data, (dict, list)) else str(data)
         if len(data_str) > max_length:
             return data_str[:max_length] + "..."
         return data_str
@@ -109,7 +106,7 @@ class LoggingMiddleware(BaseHTTPMiddleware):
             "user": getattr(request.state, "user_email_for_logging", "Anonymous"),
             "headers": headers,
             "event_type": "http_request",
-            "view_func": (request.scope.get("endpoint").__name__ if request.scope.get("endpoint") else None),
+            "view_func": (_ep.__name__ if (_ep := request.scope.get("endpoint")) else None),
         }
 
         if request.method in {"PUT", "POST", "PATCH"}:

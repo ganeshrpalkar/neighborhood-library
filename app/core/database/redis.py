@@ -76,6 +76,7 @@ def get_redis_client() -> redis.Redis:
     global _redis_client, _redis_pool
     if _redis_client is None:
         startup_redis()
+    assert _redis_client is not None
     return _redis_client
 
 
@@ -84,6 +85,7 @@ def get_redis_cache_client() -> redis.Redis:
     global _redis_cache_client, _redis_cache_pool
     if _redis_cache_client is None:
         startup_redis()
+    assert _redis_cache_client is not None
     return _redis_cache_client
 
 

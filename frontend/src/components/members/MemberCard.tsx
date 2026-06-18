@@ -1,9 +1,9 @@
 "use client";
 
 import { forwardRef } from "react";
-import { motion } from "framer-motion";
 import { Mail, Phone, Pencil, Trash2, BookMarked } from "lucide-react";
 import { Badge } from "@/components/ui/Badge";
+import { Card } from "@/components/ui/Card";
 import type { Member } from "@/lib/types";
 import { cn } from "@/lib/cn";
 
@@ -30,16 +30,7 @@ export const MemberCard = forwardRef<HTMLDivElement, MemberCardProps>(function M
   const grad = GRAD[member.id % GRAD.length];
 
   return (
-    <motion.div
-      ref={ref}
-      layout
-      initial={{ opacity: 0, y: 20 }}
-      animate={{ opacity: 1, y: 0 }}
-      exit={{ opacity: 0, scale: 0.95 }}
-      transition={{ delay: Math.min(index * 0.04, 0.3) }}
-      whileHover={{ y: -6 }}
-      className="glass group flex flex-col rounded-3xl p-5 transition-shadow hover:shadow-glow-cyan"
-    >
+    <Card ref={ref} index={index} variant="grid" glow="cyan">
       <div className="mb-4 flex items-start gap-4">
         <div
           className={cn(
@@ -101,7 +92,7 @@ export const MemberCard = forwardRef<HTMLDivElement, MemberCardProps>(function M
           </button>
         </div>
       </div>
-    </motion.div>
+    </Card>
   );
 });
 

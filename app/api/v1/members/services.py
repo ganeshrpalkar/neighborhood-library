@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from sqlalchemy import func, or_, select
+from sqlalchemy import ColumnElement, func, or_, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.api.v1.members.models import Member
@@ -16,7 +17,7 @@ def list_members(
     if search:
         q = search.strip()
         like = f"%{q}%"
-        conds = [Member.name.ilike(like), Member.email.ilike(like)]
+        conds: list[ColumnElement[bool]] = [Member.name.ilike(like), Member.email.ilike(like)]
         if len(q) >= 4:
             conds += [func.word_similarity(q, Member.name) > 0.45, func.word_similarity(q, Member.email) > 0.45]
         stmt = stmt.where(or_(*conds))
@@ -32,7 +33,7 @@ def autocomplete_members(db: Session, q: str, limit: int = 8) -> list[Member]:
         return []
     like = f"%{q}%"
     score = func.greatest(func.word_similarity(q, Member.name), func.word_similarity(q, Member.email))
-    conds = [Member.name.ilike(like), Member.email.ilike(like)]
+    conds: list[ColumnElement[bool]] = [Member.name.ilike(like), Member.email.ilike(like)]
     if len(q) >= 4:
         conds += [func.word_similarity(q, Member.name) > 0.45, func.word_similarity(q, Member.email) > 0.45]
     stmt = select(Member).where(or_(*conds)).order_by(score.desc(), Member.name.asc()).limit(limit)
@@ -48,7 +49,7 @@ def get_member(db: Session, member_id: int) -> Member:
 
 def create_member(db: Session, data: dict) -> Member:
     if db.scalar(select(Member).where(Member.email == data["email"])) is not None:
-        raise ConflictError(f"A member with email '{data['email']}' already exists")
+        raise ConflictError(f"A member with email '{data['email']}' already exists") from None
     member = Member(
         name=data["name"],
         email=data["email"],
@@ -56,7 +57,11 @@ def create_member(db: Session, data: dict) -> Member:
         address=data.get("address"),
     )
     db.add(member)
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        raise ConflictError(f"A member with email '{data['email']}' already exists") from None
     db.refresh(member)
     return member
 
@@ -69,11 +74,15 @@ def update_member(db: Session, member_id: int, data: dict) -> Member:
         and new_email != member.email
         and db.scalar(select(Member).where(Member.email == new_email)) is not None
     ):
-        raise ConflictError(f"A member with email '{new_email}' already exists")
+        raise ConflictError(f"A member with email '{new_email}' already exists") from None
     for field in ("name", "email", "phone", "address", "is_active"):
         if field in data and data[field] is not None:
             setattr(member, field, data[field])
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        raise ConflictError(f"A member with email '{new_email}' already exists") from None
     db.refresh(member)
     return member
 

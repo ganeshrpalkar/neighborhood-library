@@ -66,19 +66,23 @@ jobs:
           ENVIRONMENT: local
 
   # ─────────────────────────────────────────────────────────────
-  # Contract tests — in-process ASGI against live MongoDB + Redis
+  # Contract tests — in-process ASGI against live PostgreSQL + Redis
   # ─────────────────────────────────────────────────────────────
   contract-tests:
     name: Contract Tests
     runs-on: ubuntu-latest
 
     services:
-      mongodb:
-        image: mongo:7.0
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: library
+          POSTGRES_PASSWORD: library
+          POSTGRES_DB: library
         ports:
-          - 27017:27017
+          - 5432:5432
         options: >-
-          --health-cmd "mongosh --eval 'db.runCommand({ ping: 1 })' --quiet"
+          --health-cmd "pg_isready -U library"
           --health-interval 10s
           --health-timeout 5s
           --health-retries 5
@@ -103,6 +107,11 @@ jobs:
       - name: Install dependencies
         run: uv sync
 
+      - name: Run migrations
+        run: uv run alembic upgrade head
+        env:
+          DATABASE_URL: postgresql+psycopg://library:library@localhost:5432/library
+
       - name: Run contract tests
         run: |
           uv run pytest tests/test_health.py tests/contract/ \
@@ -111,8 +120,7 @@ jobs:
         env:
           PYTHONPATH: .
           ENVIRONMENT: local
-          MONGO_ENDPOINT: mongodb://localhost:27017
-          MONGO_DB: app-test
+          DATABASE_URL: postgresql+psycopg://library:library@localhost:5432/library
           REDIS_URL: redis://localhost:6379/15
           REDIS_KEY_PREFIX: app-test
           JWT_SECRET_KEY: ci-test-secret-key

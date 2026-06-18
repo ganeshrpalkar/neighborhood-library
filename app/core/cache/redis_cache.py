@@ -14,7 +14,7 @@ import random
 import zlib
 from collections.abc import Callable
 from functools import wraps
-from typing import Any, ParamSpec, TypeVar
+from typing import Any, ParamSpec, TypeVar, cast
 
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
@@ -137,7 +137,7 @@ def redis_cache_response(
     def decorator(route_func: Callable[P, R]) -> Callable[P, R]:
         @wraps(route_func)
         def wrapper(*args: P.args, **kwargs: P.kwargs) -> R:
-            request: Request | None = kwargs.get("request")
+            request: Request | None = cast("Request | None", kwargs.get("request"))
             if request is None:
                 for arg in args:
                     if isinstance(arg, Request):
@@ -157,7 +157,7 @@ def redis_cache_response(
                 cached = _load_cached(client.get(_redis_key(ck)))
                 if cached is not None:
                     data, status_code = _unpack_payload(cached)
-                    return JSONResponse(content=data, status_code=status_code)
+                    return cast(R, JSONResponse(content=data, status_code=status_code))
             except Exception:
                 logger.debug("Redis cache read failed for key: %s", ck, exc_info=True)
 
@@ -168,10 +168,10 @@ def redis_cache_response(
             if isinstance(response, JSONResponse):
                 status_code = response.status_code
                 if status_code == 200:
-                    body = json.loads(response.body.decode())
+                    body = json.loads(bytes(response.body).decode())
             elif isinstance(response, Response):
                 status_code = response.status_code
-                body = json.loads(response.body.decode()) if response.body else {}
+                body = json.loads(bytes(response.body).decode()) if response.body else {}
             elif isinstance(response, tuple) and len(response) == 2:
                 body, status_code = response[0], int(response[1])
 

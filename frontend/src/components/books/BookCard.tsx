@@ -1,9 +1,9 @@
 "use client";
 
 import { forwardRef } from "react";
-import { motion } from "framer-motion";
 import { BookOpen, Pencil, Trash2, HandHeart } from "lucide-react";
 import { Badge } from "@/components/ui/Badge";
+import { Card } from "@/components/ui/Card";
 import { bookCoverUrl } from "@/lib/api";
 import type { Book } from "@/lib/types";
 import { cn } from "@/lib/cn";
@@ -26,16 +26,7 @@ export const BookCard = forwardRef<HTMLDivElement, BookCardProps>(function BookC
   const available = book.available_copies > 0;
 
   return (
-    <motion.div
-      ref={ref}
-      layout
-      initial={{ opacity: 0, y: 20 }}
-      animate={{ opacity: 1, y: 0 }}
-      exit={{ opacity: 0, scale: 0.95 }}
-      transition={{ delay: Math.min(index * 0.04, 0.3) }}
-      whileHover={{ y: -6 }}
-      className="glass group flex flex-col rounded-3xl p-5 transition-shadow hover:shadow-glow"
-    >
+    <Card ref={ref} index={index} variant="grid" glow="violet">
       <div className="mb-4 flex items-start gap-4">
         <div
           className="relative h-24 w-16 shrink-0 overflow-hidden rounded-lg shadow-lg"
@@ -116,7 +107,7 @@ export const BookCard = forwardRef<HTMLDivElement, BookCardProps>(function BookC
           </button>
         </div>
       </div>
-    </motion.div>
+    </Card>
   );
 });
 
