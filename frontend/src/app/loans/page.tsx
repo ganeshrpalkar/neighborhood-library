@@ -9,6 +9,7 @@ import { AppShell } from "@/components/layout/AppShell";
 import { PageHeader } from "@/components/layout/PageHeader";
 import { Button } from "@/components/ui/Button";
 import { StatusPill } from "@/components/ui/Badge";
+import { Card } from "@/components/ui/Card";
 import { Pagination } from "@/components/ui/Pagination";
 import { RowSkeleton } from "@/components/ui/Skeleton";
 import { EmptyState } from "@/components/ui/EmptyState";
@@ -145,15 +146,7 @@ function LoansContent() {
         <div className="space-y-3">
           <AnimatePresence mode="popLayout">
             {loans.map((loan, i) => (
-              <motion.div
-                key={loan.id}
-                layout
-                initial={{ opacity: 0, y: 12 }}
-                animate={{ opacity: 1, y: 0 }}
-                exit={{ opacity: 0, scale: 0.98 }}
-                transition={{ delay: Math.min(i * 0.03, 0.25) }}
-                className="glass flex flex-col gap-3 rounded-2xl px-5 py-4 sm:flex-row sm:items-center sm:justify-between"
-              >
+              <Card key={loan.id} index={i} variant="row" glow="none">
                 <div className="flex min-w-0 flex-1 items-center gap-3 sm:gap-5">
                   <CoverThumb bookId={loan.book_id} title={loan.book_title} className="h-14 w-10" />
                   <div className="flex min-w-0 flex-1 flex-col gap-2 sm:flex-row sm:items-center sm:gap-6">
@@ -193,7 +186,7 @@ function LoansContent() {
                     </Button>
                   )}
                 </div>
-              </motion.div>
+              </Card>
             ))}
           </AnimatePresence>
         </div>

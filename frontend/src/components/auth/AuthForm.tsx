@@ -11,6 +11,14 @@ import { Button } from "@/components/ui/Button";
 import { Preloader } from "@/components/loading/Preloader";
 import { useAuth } from "@/contexts/AuthContext";
 import { errorMessage } from "@/lib/api";
+import {
+  collectErrors,
+  email as validateEmail,
+  isValid,
+  required,
+  type Errors,
+} from "@/lib/validation";
+import { cn } from "@/lib/cn";
 
 const HeroScene = dynamic(() => import("@/components/three/HeroScene"), { ssr: false });
 
@@ -29,6 +37,7 @@ export function AuthForm({ mode }: { mode: "login" | "register" }) {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [name, setName] = useState("");
+  const [errors, setErrors] = useState<Errors<"email" | "password">>({});
   const [loading, setLoading] = useState(false);
   const [redirecting, setRedirecting] = useState(false);
 
@@ -48,6 +57,12 @@ export function AuthForm({ mode }: { mode: "login" | "register" }) {
 
   async function onSubmit(e: React.FormEvent) {
     e.preventDefault();
+    const found = collectErrors<"email" | "password">({
+      email: validateEmail(email),
+      password: required(password, "Password"),
+    });
+    setErrors(found);
+    if (!isValid(found)) return;
     setLoading(true);
     try {
       if (isRegister) {
@@ -196,17 +211,39 @@ export function AuthForm({ mode }: { mode: "login" | "register" }) {
                     </p>
                   </Item>
 
-                  <form onSubmit={onSubmit} className="mt-6 space-y-4">
+                  <form onSubmit={onSubmit} className="mt-6 space-y-4" noValidate>
                     {isRegister && (
                       <Item>
                         <Field icon={<User className="h-4 w-4" />} placeholder="Full name (optional)" value={name} onChange={setName} type="text" />
                       </Item>
                     )}
                     <Item>
-                      <Field icon={<Mail className="h-4 w-4" />} placeholder="you@example.com" value={email} onChange={setEmail} type="email" required />
+                      <Field
+                        icon={<Mail className="h-4 w-4" />}
+                        placeholder="you@example.com"
+                        value={email}
+                        onChange={(v) => {
+                          setEmail(v);
+                          setErrors((e) => (e.email ? { ...e, email: undefined } : e));
+                        }}
+                        error={errors.email}
+                        type="email"
+                        required
+                      />
                     </Item>
                     <Item>
-                      <Field icon={<Lock className="h-4 w-4" />} placeholder="Password" value={password} onChange={setPassword} type="password" required />
+                      <Field
+                        icon={<Lock className="h-4 w-4" />}
+                        placeholder="Password"
+                        value={password}
+                        onChange={(v) => {
+                          setPassword(v);
+                          setErrors((e) => (e.password ? { ...e, password: undefined } : e));
+                        }}
+                        error={errors.password}
+                        type="password"
+                        required
+                      />
                     </Item>
                     <Item>
                       <Button type="submit" loading={loading} className="w-full font-sans">
@@ -252,22 +289,31 @@ function Field({
   icon,
   value,
   onChange,
+  error,
   ...props
 }: {
   icon: React.ReactNode;
   value: string;
   onChange: (v: string) => void;
+  error?: string;
 } & Omit<React.InputHTMLAttributes<HTMLInputElement>, "onChange" | "value">) {
   return (
-    <div className="relative">
-      <span className="pointer-events-none absolute left-3.5 top-1/2 -translate-y-1/2 text-amber-800/60">{icon}</span>
-      <input
-        value={value}
-        onChange={(e) => onChange(e.target.value)}
-        suppressHydrationWarning
-        className="w-full rounded-md border border-amber-900/25 bg-amber-50/60 py-2.5 pl-10 pr-4 text-[15px] text-stone-800 outline-none transition-all placeholder:text-stone-400 focus:border-amber-700/50 focus:bg-white focus:ring-2 focus:ring-amber-600/20"
-        {...props}
-      />
+    <div>
+      <div className="relative">
+        <span className="pointer-events-none absolute left-3.5 top-1/2 -translate-y-1/2 text-amber-800/60">{icon}</span>
+        <input
+          value={value}
+          onChange={(e) => onChange(e.target.value)}
+          aria-invalid={error ? true : undefined}
+          suppressHydrationWarning
+          className={cn(
+            "w-full rounded-md border border-amber-900/25 bg-amber-50/60 py-2.5 pl-10 pr-4 text-[15px] text-stone-800 outline-none transition-all placeholder:text-stone-400 focus:border-amber-700/50 focus:bg-white focus:ring-2 focus:ring-amber-600/20",
+            error && "border-red-500/60 focus:border-red-500/70 focus:ring-red-500/20"
+          )}
+          {...props}
+        />
+      </div>
+      {error && <p className="mt-1 pl-1 text-xs text-red-700">{error}</p>}
     </div>
   );
 }

@@ -4,6 +4,7 @@ import "./globals.css";
 import { AuthProvider } from "@/contexts/AuthContext";
 import { Toaster } from "react-hot-toast";
 import AppBoot from "@/components/loading/AppBoot";
+import { ErrorBoundary } from "@/components/ErrorBoundary";
 
 const inter = Inter({ subsets: ["latin"], variable: "--font-sans" });
 const garamond = EB_Garamond({
@@ -26,7 +27,9 @@ export default function RootLayout({
     <html lang="en" className={`${inter.variable} ${garamond.variable}`}>
       <body className="font-sans antialiased">
         <AuthProvider>
-          <AppBoot>{children}</AppBoot>
+          <ErrorBoundary>
+            <AppBoot>{children}</AppBoot>
+          </ErrorBoundary>
           <Toaster
             position="top-right"
             toastOptions={{

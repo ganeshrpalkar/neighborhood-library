@@ -1,4 +1,5 @@
 import axios, { AxiosError, AxiosInstance } from "axios";
+import { ENDPOINTS } from "./endpoints";
 import type {
   AuthUser,
   Book,
@@ -88,7 +89,7 @@ export async function register(body: {
   password: string;
   name?: string;
 }): Promise<AuthUser> {
-  const { data } = await api.post<AuthUser>("/auth/register", body);
+  const { data } = await api.post<AuthUser>(ENDPOINTS.auth.register, body);
   return data;
 }
 
@@ -96,12 +97,12 @@ export async function login(body: {
   email: string;
   password: string;
 }): Promise<TokenResponse> {
-  const { data } = await api.post<TokenResponse>("/auth/token", body);
+  const { data } = await api.post<TokenResponse>(ENDPOINTS.auth.token, body);
   return data;
 }
 
 export async function getMe(): Promise<AuthUser> {
-  const { data } = await api.get<AuthUser>("/auth/me");
+  const { data } = await api.get<AuthUser>(ENDPOINTS.auth.me);
   return data;
 }
 
@@ -111,17 +112,17 @@ export async function listBooks(params: {
   page_size?: number;
   search?: string;
 }): Promise<Paginated<Book>> {
-  const { data } = await api.get<Paginated<Book>>("/books", { params });
+  const { data } = await api.get<Paginated<Book>>(ENDPOINTS.books.root, { params });
   return data;
 }
 
 export async function getBook(id: number): Promise<Book> {
-  const { data } = await api.get<Book>(`/books/${id}`);
+  const { data } = await api.get<Book>(ENDPOINTS.books.detail(id));
   return data;
 }
 
 export async function createBook(body: BookInput): Promise<Book> {
-  const { data } = await api.post<Book>("/books", body);
+  const { data } = await api.post<Book>(ENDPOINTS.books.root, body);
   return data;
 }
 
@@ -129,36 +130,36 @@ export async function updateBook(
   id: number,
   body: Partial<BookInput>
 ): Promise<Book> {
-  const { data } = await api.patch<Book>(`/books/${id}`, body);
+  const { data } = await api.patch<Book>(ENDPOINTS.books.detail(id), body);
   return data;
 }
 
 export async function deleteBook(id: number): Promise<{ success: boolean }> {
-  const { data } = await api.delete<{ success: boolean }>(`/books/${id}`);
+  const { data } = await api.delete<{ success: boolean }>(ENDPOINTS.books.detail(id));
   return data;
 }
 
 /** Public URL of a book's cover image (served from the database). */
 export function bookCoverUrl(id: number, bust?: string | number): string {
-  return `${API_URL}/books/${id}/cover${bust ? `?v=${bust}` : ""}`;
+  return `${API_URL}${ENDPOINTS.books.cover(id)}${bust ? `?v=${bust}` : ""}`;
 }
 
 export async function uploadBookCover(id: number, file: File): Promise<Book> {
   const fd = new FormData();
   fd.append("file", file);
-  const { data } = await api.put<Book>(`/books/${id}/cover`, fd, {
+  const { data } = await api.put<Book>(ENDPOINTS.books.cover(id), fd, {
     headers: { "Content-Type": "multipart/form-data" },
   });
   return data;
 }
 
 export async function autocompleteBooks(q: string, limit = 8): Promise<BookSuggestion[]> {
-  const { data } = await api.get<BookSuggestion[]>("/books/autocomplete", { params: { q, limit } });
+  const { data } = await api.get<BookSuggestion[]>(ENDPOINTS.books.autocomplete, { params: { q, limit } });
   return data;
 }
 
 export async function autocompleteMembers(q: string, limit = 8): Promise<MemberSuggestion[]> {
-  const { data } = await api.get<MemberSuggestion[]>("/members/autocomplete", { params: { q, limit } });
+  const { data } = await api.get<MemberSuggestion[]>(ENDPOINTS.members.autocomplete, { params: { q, limit } });
   return data;
 }
 
@@ -168,17 +169,17 @@ export async function listMembers(params: {
   page_size?: number;
   search?: string;
 }): Promise<Paginated<Member>> {
-  const { data } = await api.get<Paginated<Member>>("/members", { params });
+  const { data } = await api.get<Paginated<Member>>(ENDPOINTS.members.root, { params });
   return data;
 }
 
 export async function getMember(id: number): Promise<Member> {
-  const { data } = await api.get<Member>(`/members/${id}`);
+  const { data } = await api.get<Member>(ENDPOINTS.members.detail(id));
   return data;
 }
 
 export async function createMember(body: MemberInput): Promise<Member> {
-  const { data } = await api.post<Member>("/members", body);
+  const { data } = await api.post<Member>(ENDPOINTS.members.root, body);
   return data;
 }
 
@@ -186,17 +187,17 @@ export async function updateMember(
   id: number,
   body: Partial<MemberInput>
 ): Promise<Member> {
-  const { data } = await api.patch<Member>(`/members/${id}`, body);
+  const { data } = await api.patch<Member>(ENDPOINTS.members.detail(id), body);
   return data;
 }
 
 export async function deleteMember(id: number): Promise<{ success: boolean }> {
-  const { data } = await api.delete<{ success: boolean }>(`/members/${id}`);
+  const { data } = await api.delete<{ success: boolean }>(ENDPOINTS.members.detail(id));
   return data;
 }
 
 export async function getMemberLoans(id: number): Promise<Loan[]> {
-  const { data } = await api.get<Loan[]>(`/members/${id}/loans`);
+  const { data } = await api.get<Loan[]>(ENDPOINTS.members.loans(id));
   return data;
 }
 
@@ -207,21 +208,21 @@ export async function listLoans(params: {
   member_id?: number;
   status?: LoanStatus;
 }): Promise<Paginated<Loan>> {
-  const { data } = await api.get<Paginated<Loan>>("/loans", { params });
+  const { data } = await api.get<Paginated<Loan>>(ENDPOINTS.loans.root, { params });
   return data;
 }
 
 export async function getLoan(id: number): Promise<Loan> {
-  const { data } = await api.get<Loan>(`/loans/${id}`);
+  const { data } = await api.get<Loan>(ENDPOINTS.loans.detail(id));
   return data;
 }
 
 export async function createLoan(body: LoanInput): Promise<Loan> {
-  const { data } = await api.post<Loan>("/loans", body);
+  const { data } = await api.post<Loan>(ENDPOINTS.loans.root, body);
   return data;
 }
 
 export async function returnLoan(id: number): Promise<Loan> {
-  const { data } = await api.post<Loan>(`/loans/${id}/return`);
+  const { data } = await api.post<Loan>(ENDPOINTS.loans.return(id));
   return data;
 }
