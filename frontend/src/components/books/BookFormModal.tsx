@@ -6,6 +6,13 @@ import { Modal } from "@/components/ui/Modal";
 import { Input } from "@/components/ui/Input";
 import { Button } from "@/components/ui/Button";
 import { createBook, updateBook, uploadBookCover, bookCoverUrl, errorMessage } from "@/lib/api";
+import {
+  collectErrors,
+  integerAtLeast,
+  isValid,
+  required,
+  type Errors,
+} from "@/lib/validation";
 import type { Book, BookInput } from "@/lib/types";
 
 interface Props {
@@ -25,8 +32,11 @@ const empty = {
   total_copies: "1",
 };
 
+type FormErrors = Errors<"title" | "author" | "total_copies">;
+
 export function BookFormModal({ open, onClose, onSaved, book }: Props) {
   const [form, setForm] = useState(empty);
+  const [errors, setErrors] = useState<FormErrors>({});
   const [coverFile, setCoverFile] = useState<File | null>(null);
   const [loading, setLoading] = useState(false);
   const editing = !!book;
@@ -34,6 +44,7 @@ export function BookFormModal({ open, onClose, onSaved, book }: Props) {
   useEffect(() => {
     if (open) {
       setCoverFile(null);
+      setErrors({});
       setForm(
         book
           ? {
@@ -52,10 +63,23 @@ export function BookFormModal({ open, onClose, onSaved, book }: Props) {
 
   function set<K extends keyof typeof form>(key: K, val: string) {
     setForm((f) => ({ ...f, [key]: val }));
+    // Clear a field's error as soon as the user edits it.
+    setErrors((e) => (e[key as keyof FormErrors] ? { ...e, [key]: undefined } : e));
+  }
+
+  function validate(): FormErrors {
+    return collectErrors<"title" | "author" | "total_copies">({
+      title: required(form.title, "Title"),
+      author: required(form.author, "Author"),
+      total_copies: integerAtLeast(form.total_copies, 0, "Total copies"),
+    });
   }
 
   async function onSubmit(e: React.FormEvent) {
     e.preventDefault();
+    const found = validate();
+    setErrors(found);
+    if (!isValid(found)) return;
     setLoading(true);
     try {
       const payload: BookInput = {
@@ -86,11 +110,12 @@ export function BookFormModal({ open, onClose, onSaved, book }: Props) {
 
   return (
     <Modal open={open} onClose={onClose} title={editing ? "Edit book" : "Add book"}>
-      <form onSubmit={onSubmit} className="space-y-4">
+      <form onSubmit={onSubmit} className="space-y-4" noValidate>
         <Input
           label="Title"
           value={form.title}
           onChange={(e) => set("title", e.target.value)}
+          error={errors.title}
           required
           placeholder="The Midnight Library"
         />
@@ -98,6 +123,7 @@ export function BookFormModal({ open, onClose, onSaved, book }: Props) {
           label="Author"
           value={form.author}
           onChange={(e) => set("author", e.target.value)}
+          error={errors.author}
           required
           placeholder="Matt Haig"
         />
@@ -136,6 +162,7 @@ export function BookFormModal({ open, onClose, onSaved, book }: Props) {
           min={0}
           value={form.total_copies}
           onChange={(e) => set("total_copies", e.target.value)}
+          error={errors.total_copies}
           required
         />
 
