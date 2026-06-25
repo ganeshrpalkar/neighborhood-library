@@ -1,0 +1,142 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# .dockerignore — excludes paths from the Docker build context.
+# The `api` and `worker` images both build from context `.` with `COPY . .`,
+# so anything listed here is NEVER baked into the images pushed to ECR and run
+# on ECS Fargate.
+# ──────────────────────────────────────────────────────────────────────────────
+
+# ── AI assistant / agent tooling ──────────────────────────────────────────────
+# Keep the AI workflow out of shipped images. Covers config, rules, and context
+# files for the common AI coding tools — at the repo root and any subdirectory.
+# Claude Code / Anthropic
+CLAUDE.md
+**/CLAUDE.md
+CLAUDE.local.md
+**/CLAUDE.local.md
+.claude/
+**/.claude/
+# OpenAI Codex / generic agent instruction files
+AGENTS.md
+**/AGENTS.md
+.codex/
+**/.codex/
+# Google Gemini CLI
+GEMINI.md
+**/GEMINI.md
+.gemini/
+**/.gemini/
+# Cursor
+.cursor/
+**/.cursor/
+.cursorrules
+**/.cursorrules
+.cursorignore
+# Windsurf / Codeium
+.windsurf/
+.windsurfrules
+**/.windsurfrules
+.codeium/
+# GitHub Copilot
+**/copilot-instructions.md
+.github/instructions/
+# Aider
+.aider*
+**/.aider*
+.aiderignore
+# Continue / Cline / Roo Code
+.continue/
+.clinerules
+**/.clinerules
+.roo/
+.roomodes
+.roorules
+# OpenCode
+opencode.json
+**/opencode.json
+.opencode/
+# Other assistants (Sourcegraph Cody, Tabnine, generic .ai config)
+.sourcegraph/
+.cody/
+.tabnine/
+.ai/
+# Model Context Protocol (MCP) server config
+.mcp.json
+**/.mcp.json
+# Local knowledge base / "second brain" + dev handoff notes
+KNOWLEDGE/
+RESUME.md
+
+# ── Secrets / environment ─────────────────────────────────────────────────────
+# Runtime env is injected via compose env_file/environment, never copied in.
+.env
+.env.*
+**/.env
+**/.env.*
+
+# ── Version control / CI ──────────────────────────────────────────────────────
+.git/
+.gitignore
+.gitattributes
+.github/
+
+# ── Python bytecode / build artifacts ─────────────────────────────────────────
+__pycache__/
+**/__pycache__/
+*.py[cod]
+**/*.py[cod]
+*$py.class
+*.so
+*.egg
+*.egg-info/
+build/
+dist/
+
+# ── Virtual environments (image builds its own .venv via `uv sync`) ───────────
+.venv/
+**/.venv/
+venv/
+env/
+ENV/
+
+# ── Tooling caches ────────────────────────────────────────────────────────────
+.uv-cache/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.hypothesis/
+.coverage
+coverage.xml
+htmlcov/
+junit.xml
+
+# ── Logs ──────────────────────────────────────────────────────────────────────
+*.log
+logs/
+celerybeat-schedule
+celerybeat.pid
+
+# ── Frontend (Next.js app is built & deployed separately) ─────────────────────
+frontend/
+**/node_modules/
+
+# ── Infra / docs / tests not needed at runtime ────────────────────────────────
+terraform/
+docs/
+tests/
+
+# ── Docker / compose meta (not needed inside the image) ───────────────────────
+Dockerfile*
+**/Dockerfile*
+docker-compose*.yml
+.dockerignore
+
+# ── OS / editor cruft ─────────────────────────────────────────────────────────
+.DS_Store
+**/.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo
+*.swn
+*~

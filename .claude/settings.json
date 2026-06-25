@@ -1,0 +1,40 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(uv run *)",
+      "Bash(uv sync)",
+      "Bash(uv lock)",
+      "Bash(uv add *)",
+      "Bash(make *)",
+      "Bash(docker compose *)",
+      "Bash(find . *)",
+      "Bash(grep *)",
+      "Bash(ls *)",
+      "Bash(git status)",
+      "Bash(git log *)",
+      "Bash(git diff *)",
+      "Bash(git add *)",
+      "Bash(git commit *)"
+    ],
+    "deny": [
+      "Bash(git push --force*)",
+      "Bash(rm -rf *)",
+      "Bash(git reset --hard *)"
+    ]
+  },
+  "model": "claude-sonnet-4-6",
+  "cleanupPeriodDays": 30,
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Write|Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "uv run ruff check app/ tests/ --quiet 2>&1 | head -30"
+          }
+        ]
+      }
+    ]
+  }
+}

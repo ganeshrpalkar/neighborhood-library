@@ -1,0 +1,39 @@
+# Codex CLI project configuration
+# https://github.com/openai/codex
+
+model = "o4-mini"
+model_reasoning_effort = "medium"
+approval_policy = "on-request"
+
+# Read project instructions from these files (in order)
+project_doc_fallback_filenames = ["AGENTS.md", "CLAUDE.md", "README.md"]
+project_doc_max_bytes = 32768
+
+[features]
+shell_tool = true
+codex_git_commit = false
+memories = true
+web_search = "cached"
+
+[tui]
+notifications = true
+show_tooltips = true
+
+# MCP servers — see docs/AI_TOOLING.md. Set POSTGRES_MCP_URL in your env to override.
+[mcp_servers.postgres]
+command = "npx"
+args = ["-y", "@modelcontextprotocol/server-postgres", "postgresql://library:library@localhost:5432/library"]
+env = { POSTGRES_MCP_URL = "postgresql://library:library@localhost:5432/library" }
+
+[mcp_servers.context7]
+command = "npx"
+args = ["-y", "@upstash/context7-mcp"]
+
+[mcp_servers.fetch]
+command = "uvx"
+args = ["mcp-server-fetch"]
+
+[mcp_servers.github]
+command = "npx"
+args = ["-y", "@modelcontextprotocol/server-github"]
+env = { GITHUB_PERSONAL_ACCESS_TOKEN = "${GITHUB_PERSONAL_ACCESS_TOKEN:-}" }

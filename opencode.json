@@ -1,0 +1,63 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "model": "anthropic/claude-sonnet-4-6",
+  "autoupdate": true,
+  "instructions": [
+    "CLAUDE.md",
+    "AGENTS.md",
+    "docs/ARCHITECTURE.md",
+    "docs/ADDING_AN_API.md",
+    "docs/TESTING.md",
+    "docs/CONFIGURATION.md"
+  ],
+  "share": "manual",
+  "snapshot": true,
+  "mcp": {
+    "postgres": {
+      "type": "local",
+      "command": ["npx", "-y", "@modelcontextprotocol/server-postgres", "{env:POSTGRES_MCP_URL}"],
+      "environment": {
+        "POSTGRES_MCP_URL": "postgresql://library:library@localhost:5432/library"
+      },
+      "enabled": true
+    },
+    "context7": {
+      "type": "local",
+      "command": ["npx", "-y", "@upstash/context7-mcp"],
+      "enabled": true
+    },
+    "fetch": {
+      "type": "local",
+      "command": ["uvx", "mcp-server-fetch"],
+      "enabled": true
+    },
+    "github": {
+      "type": "local",
+      "command": ["npx", "-y", "@modelcontextprotocol/server-github"],
+      "environment": {
+        "GITHUB_PERSONAL_ACCESS_TOKEN": "{env:GITHUB_PERSONAL_ACCESS_TOKEN}"
+      },
+      "enabled": true
+    }
+  },
+  "watcher": {
+    "ignore": [
+      "**/.venv/**",
+      "**/venv/**",
+      "**/__pycache__/**",
+      "**/*.pyc",
+      "**/.pytest_cache/**",
+      "**/.mypy_cache/**",
+      "**/.ruff_cache/**",
+      "**/.env",
+      "**/.env.local",
+      "**/.git/**",
+      "**/uv.lock",
+      "**/htmlcov/**",
+      "**/.coverage",
+      "**/terraform/.terraform/**",
+      "**/terraform/*.tfstate",
+      "**/terraform/*.tfstate.backup"
+    ]
+  }
+}

@@ -1,0 +1,117 @@
+---
+description: FastAPI-specific patterns — route definitions, response models, dependency injection, request/response shapes. Apply when editing router.py files or FastAPI app config.
+globs: "app/api/**/*.py,app/main.py"
+alwaysApply: false
+---
+
+# FastAPI Patterns
+
+## Route Definition Standard
+
+```python
+from fastapi import APIRouter, Depends, Query, status
+from sqlalchemy.orm import Session
+
+from app.core.database.postgres import get_session
+
+router = APIRouter()
+
+@router.get("/", response_model=PaginatedBooks)
+def list_books(
+    page: int = Query(1, ge=1),
+    page_size: int = Query(10, ge=1, le=100),
+    current_user: UserContext = Depends(get_current_user),
+    db: Session = Depends(get_session),
+) -> PaginatedBooks:
+    books, total = services.list_books(db, page, page_size)
+    return PaginatedBooks(items=books, total=total, page=page, page_size=page_size)
+
+@router.post("/", response_model=BookResponse, status_code=status.HTTP_201_CREATED)
+def create_book(
+    body: BookCreate,
+    current_user: UserContext = Depends(get_current_user),
+    db: Session = Depends(get_session),
+) -> BookResponse:
+    return services.create_book(db, body)
+```
+
+## Dependency Injection for DB
+
+Use the shared `get_session` dependency from `app/core/database/postgres.py` — it yields a `Session` per request, commits on success, and rolls back + closes on error:
+
+```python
+from sqlalchemy.orm import Session
+from app.core.database.postgres import get_session
+
+db: Session = Depends(get_session)
+```
+
+Never construct your own `Session` or `engine` inside a route.
+
+## Auth Dependencies
+
+```python
+from app.core.security.jwt import get_current_user, get_optional_user, UserContext
+from app.core.security.permissions import require_admin, require_roles
+
+# Required auth
+current_user: UserContext = Depends(get_current_user)
+
+# Optional auth (unauthenticated = None)
+current_user: UserContext | None = Depends(get_optional_user)
+
+# Admin only
+current_user: UserContext = Depends(require_admin())
+
+# Role-gated
+current_user: UserContext = Depends(require_roles("librarian", "admin"))
+```
+
+## Response Models
+
+Always declare `response_model=` on routes — it validates outgoing data and generates OpenAPI docs. Response schemas use `ConfigDict(from_attributes=True)` so ORM objects serialize directly:
+
+```python
+@router.get("/{book_id}", response_model=BookResponse)
+def get_book(book_id: int, ...): ...
+```
+
+## Path Parameter Validation
+
+Path IDs are **integers** (PostgreSQL serial PKs):
+
+```python
+from typing import Annotated
+from fastapi import Path
+
+@router.get("/{book_id}")
+def get_book(
+    book_id: Annotated[int, Path(ge=1)],
+    ...
+):
+```
+
+## Caching GET Endpoints
+
+```python
+from app.core.cache.redis_cache import redis_cache_response
+from fastapi import Request
+
+@router.get("/")
+@redis_cache_response(ttl=120, cache_key_prefix="book_list")
+def list_books(request: Request, ...):
+    # request MUST be the first positional arg — used for cache key
+```
+
+## Health Check Pattern
+
+The real health check lives in `app/main.py` (`GET /api/health`) and uses these helpers:
+
+```python
+from app.core.database.postgres import postgres_health_check
+from app.core.database.redis import redis_health_check
+
+postgres_ok = postgres_health_check().get("status") == "ok"   # SELECT 1 round-trip
+redis_ok = redis_health_check().get("status") == "ok"
+# Returns 200 with {"status": "ok", ...} or 503 with {"status": "degraded", ...}
+```

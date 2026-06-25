@@ -1,0 +1,78 @@
+---
+description: Core project rules that always apply — package manager, Python version, environment config, and hard architectural constraints.
+globs: "**/*.py,**/*.toml,**/*.yml,**/*.yaml"
+alwaysApply: true
+---
+
+# Neighborhood Library Service — Core Rules
+
+## Package Manager: uv only
+
+Never suggest `pip install`. All dependency operations use `uv`:
+
+```bash
+uv sync                  # Install from uv.lock
+uv add <package>         # Add new dependency
+uv lock                  # Regenerate uv.lock after pyproject.toml change
+uv run pytest            # Run commands in project venv
+```
+
+`uv.lock` is committed and is the source of truth.
+
+## Python Version
+
+Python 3.12+. Use modern syntax:
+- `str | None` not `Optional[str]`
+- `dict[str, Any]` not `Dict[str, Any]`
+- `list[str]` not `List[str]`
+- Match statements for complex conditionals
+
+## Environment Variables
+
+All configuration goes through `app/core/config.py` (Pydantic BaseSettings). Never read `os.environ` directly outside that file.
+
+```python
+# BAD
+import os
+db_url = os.environ["DATABASE_URL"]
+
+# GOOD
+from app.core.config import settings
+db_url = settings.DATABASE_URL
+```
+
+## Exception Hierarchy
+
+Always raise from `app.core.exceptions`, never bare `HTTPException` in service code:
+
+```python
+from app.core.exceptions import NotFoundError, AccessDeniedError, ConflictError, ValidationError
+raise NotFoundError("book not found")        # → 404
+raise AccessDeniedError("forbidden")         # → 403
+raise ConflictError("no copies available")   # → 409
+```
+
+## Module Layer Contract
+
+| Layer | File | Imports FastAPI? | Raises HTTPException? |
+|-------|------|------------------|-----------------------|
+| Schema | `schemas.py` | No | No |
+| Model | `models.py` | No | No |
+| Service | `services.py` | **No** | **No** |
+| Router | `router.py` | Yes | Via exception handlers |
+
+Schema changes go through **Alembic migrations** — never alter tables by hand.
+
+## No Comments for Obvious Code
+
+Only add a comment when the WHY is non-obvious. Never comment what the code does.
+
+```python
+# BAD: obvious
+# Get the book from the database
+book = db.get(Book, book_id)
+
+# GOOD: non-obvious constraint
+# Lock the row FOR UPDATE so concurrent borrows can't both decrement to -1
+book = db.scalar(select(Book).where(Book.id == book_id).with_for_update())
+```

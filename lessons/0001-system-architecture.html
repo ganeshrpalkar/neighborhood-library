@@ -1,0 +1,209 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Lesson 1: System Architecture Overview</title>
+  <link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+
+<nav class="lesson-nav">
+  <span>Neighborhood Library</span>
+  <span class="sep">·</span>
+  <a href="0002-concurrency-row-locking.html">Lesson 2: Concurrency →</a>
+  <span class="sep">·</span>
+  <a href="0003-interview-flashcards.html">Lesson 3: Flashcards →</a>
+  <span class="sep">·</span>
+  <a href="../reference/architecture-cheatsheet.html">Cheat Sheet</a>
+</nav>
+
+<div class="lesson-tag">Lesson 1 of 3</div>
+<h1>System Architecture Overview</h1>
+<p class="subtitle">The 30-second pitch, the 5-minute walkthrough, and the "why" behind every layer.</p>
+
+<h2>The 30-Second Pitch</h2>
+<p>This is a <strong>REST API for a neighborhood library</strong>: members borrow and return books, staff manage the catalog, and the system enforces inventory constraints atomically. It's built on a production-grade FastAPI stack — PostgreSQL for persistence, Redis for response caching, Celery for background jobs — deployed to AWS ECS Fargate via Terraform and GitHub Actions.</p>
+
+<h2>The Four-Layer Architecture</h2>
+<p>Every domain module — books, members, loans — follows the same pattern. Four files, strict separation of concerns:</p>
+
+<div class="diagram">┌──────────────────────────────────────────────────────┐
+│                    HTTP Request                      │
+└───────────────────────┬──────────────────────────────┘
+                        │
+              ┌─────────▼──────────┐
+              │     router.py      │  HTTP only — routes, auth deps, status codes
+              └─────────┬──────────┘
+                        │ calls
+              ┌─────────▼──────────┐
+              │    services.py     │  Business logic — NEVER imports FastAPI
+              └─────────┬──────────┘
+                        │ queries/mutates
+              ┌─────────▼──────────┐
+              │     models.py      │  SQLAlchemy ORM — table definitions
+              └────────────────────┘
+                        ▲
+              ┌─────────┴──────────┐
+              │     schemas.py     │  Pydantic DTOs — request/response shapes
+              └────────────────────┘</div>
+
+<p>The key invariant: <strong>services never import from FastAPI</strong>. This means the service layer is testable without an HTTP context, reusable in Celery tasks or CLI scripts, and has a single clear responsibility — business logic only.</p>
+
+<h2>A Request From End to End</h2>
+<p>When a staff member borrows a book, here is the exact path:</p>
+
+<pre>POST /api/v1/loans  { "book_id": 42, "member_id": 7 }
+
+ 1. LoggingMiddleware    — assign correlation_id, start timer
+ 2. CORSMiddleware       — validate Origin header
+ 3. JWT Dependency       — decode Bearer token → UserContext(user_id, roles)
+ 4. loans/router.py      — validate request body via LoanCreate Pydantic schema
+ 5. loans/services.py    — borrow_book(db, book_id=42, member_id=7)
+ 6.   SELECT FOR UPDATE  — lock book row #42 in PostgreSQL
+ 7.   Check copies       — available_copies >= 1?
+ 8.   Decrement          — available_copies -= 1
+ 9.   INSERT loan        — status='active', due_date = now + 14 days
+10.   db.commit()        — book update + new loan commit atomically
+11. 201 LoanResponse     — Pydantic serializes ORM object → JSON
+12. LoggingMiddleware    — log request/response pair with execution time</pre>
+
+<h2>Technology Choices — and Why</h2>
+<table>
+  <thead>
+    <tr><th>Choice</th><th>Alternative</th><th>Why this one</th></tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><strong>FastAPI</strong></td>
+      <td>Django REST Framework</td>
+      <td>Auto-generated OpenAPI docs, Pydantic validation at the boundary, clean Depends() injection. DRF's magic (viewsets, mixins, serializers) fights against strict layer separation.</td>
+    </tr>
+    <tr>
+      <td><strong>Sync SQLAlchemy 2.0</strong></td>
+      <td>Async SQLAlchemy</td>
+      <td>Simpler transaction reasoning. Row locking (SELECT FOR UPDATE) is natural in sync. Gunicorn + thread workers is sufficient for this workload — async adds complexity without a meaningful win.</td>
+    </tr>
+    <tr>
+      <td><strong>PostgreSQL</strong></td>
+      <td>SQLite / MySQL</td>
+      <td>Row-level locking, trigram GIN indexes for fuzzy search, robust ACID guarantees, managed on RDS.</td>
+    </tr>
+    <tr>
+      <td><strong>Redis</strong></td>
+      <td>In-process cache</td>
+      <td>Shared across all ECS tasks (multiple replicas). Survives pod restarts. TTL + eviction built-in.</td>
+    </tr>
+    <tr>
+      <td><strong>HS256 JWT</strong></td>
+      <td>RS256, sessions, API keys</td>
+      <td>Single service — symmetric signing is appropriate and simpler. No public key distribution needed. Stateless: no session store, no database lookup per request.</td>
+    </tr>
+    <tr>
+      <td><strong>Celery</strong></td>
+      <td>Cron, APScheduler</td>
+      <td>Distributed task queue with retries, beat scheduler, Flower monitoring. Overdue loan flagging is a daily idempotent job that benefits from Celery's retry semantics.</td>
+    </tr>
+  </tbody>
+</table>
+
+<h2>The Session Dependency — Auto-Commit and Auto-Rollback</h2>
+<p>Every route that touches the DB receives a session via <code>db: Session = Depends(get_session)</code>. The dependency handles transaction lifecycle automatically:</p>
+
+<pre>def get_session() -> Generator[Session, None, None]:
+    session = get_sessionmaker()()
+    try:
+        yield session
+        session.commit()      # ← auto-commit on route success
+    except Exception:
+        session.rollback()    # ← auto-rollback on any exception
+        raise
+    finally:
+        session.close()       # ← always closed</pre>
+
+<p>Services never call <code>db.commit()</code> themselves — except inside atomic operations like borrow/return where they must commit both the loan and the book update together. Everything else is committed by the dependency after the route returns successfully.</p>
+
+<h2>Infrastructure</h2>
+<div class="diagram">GitHub Actions (OIDC → AWS role, no static keys)
+  │
+  ├── Build & push Docker images → ECR
+  ├── Run Alembic migrations → one-off ECS task
+  └── Rolling deploy → ECS services
+
+ECS Fargate:
+  ├── api service    (2+ tasks, FastAPI + Uvicorn/Gunicorn)
+  └── worker service (1 task, Celery beat + worker)
+        │
+  ┌─────┴──────────────────────┐
+  ▼                            ▼
+RDS PostgreSQL            ElastiCache Redis
+(managed, multi-AZ)       (managed, 2 pools)
+
+ALB → api tasks
+CloudFront → S3 → Next.js frontend (static export)
+Route53 + ACM → HTTPS everywhere</div>
+
+<p>All infrastructure is declared in <strong>Terraform</strong> — VPC, ECS, RDS, ElastiCache, ALB, ECR, S3/CloudFront, Route53/ACM, Secrets Manager, GitHub OIDC role. No manual AWS console clicks in production.</p>
+
+<!-- QUIZ -->
+<section class="quiz">
+  <h2>Retrieval Practice</h2>
+  <p class="quiz-score"></p>
+
+  <div class="quiz-question" data-correct="b">
+    <p class="quiz-question-text">1. What is the key rule about services.py that makes the architecture testable and reusable?</p>
+    <div class="quiz-options">
+      <button class="quiz-option" data-value="a">Services must always return Pydantic schema objects directly</button>
+      <button class="quiz-option" data-value="b">Services never import anything at all from FastAPI</button>
+      <button class="quiz-option" data-value="c">Services must never raise exceptions under any circumstances</button>
+      <button class="quiz-option" data-value="d">Services always accept the full HTTP Request as first argument</button>
+    </div>
+    <div class="quiz-explanation">Services accept a <code>Session</code> and domain arguments. No FastAPI means they work identically in an HTTP route, a Celery task, a CLI script, or a unit test — no HTTP context needed.</div>
+  </div>
+
+  <div class="quiz-question" data-correct="c">
+    <p class="quiz-question-text">2. Why was sync SQLAlchemy chosen instead of async SQLAlchemy?</p>
+    <div class="quiz-options">
+      <button class="quiz-option" data-value="a">Async SQLAlchemy doesn't support PostgreSQL row-level locking</button>
+      <button class="quiz-option" data-value="b">Async requires more dependencies and produces much slower queries</button>
+      <button class="quiz-option" data-value="c">Simpler transaction reasoning and natural fit for row-level locking</button>
+      <button class="quiz-option" data-value="d">Sync mode supports connection pooling and async mode does not</button>
+    </div>
+    <div class="quiz-explanation">Sync is a deliberate choice, not a limitation. One thread, one transaction, one mental model. SELECT FOR UPDATE works naturally. The workload doesn't require async — Gunicorn + thread pool handles the concurrency profile fine.</div>
+  </div>
+
+  <div class="quiz-question" data-correct="a">
+    <p class="quiz-question-text">3. What does the <code>get_session()</code> dependency do when a route raises an exception?</p>
+    <div class="quiz-options">
+      <button class="quiz-option" data-value="a">Rolls back the transaction, then closes the session</button>
+      <button class="quiz-option" data-value="b">Commits the partial transaction, then closes the session</button>
+      <button class="quiz-option" data-value="c">Retries the full transaction up to three total attempts</button>
+      <button class="quiz-option" data-value="d">Logs the error and returns an empty 200 response body</button>
+    </div>
+    <div class="quiz-explanation">The dependency wraps the session in try/except/finally: success → commit, exception → rollback, always → close. Partial writes are never committed to the database.</div>
+  </div>
+
+  <div class="quiz-question" data-correct="d">
+    <p class="quiz-question-text">4. Why is HS256 JWT appropriate here, but NOT in a multi-service system?</p>
+    <div class="quiz-options">
+      <button class="quiz-option" data-value="a">HS256 tokens carry more claims and are therefore more expressive</button>
+      <button class="quiz-option" data-value="b">HS256 verification is much faster than RS256 asymmetric tokens</button>
+      <button class="quiz-option" data-value="c">HS256 supports token revocation through the shared secret key</button>
+      <button class="quiz-option" data-value="d">Every verifier must hold the secret and could therefore forge tokens</button>
+    </div>
+    <div class="quiz-explanation">With HS256, any service that verifies tokens must also hold the signing secret — meaning it could forge tokens. For a single service this is fine. In a multi-service system, RS256 is better: the auth service signs with a private key; other services verify with the public key only and can never forge tokens.</div>
+  </div>
+</section>
+
+<section class="primary-source">
+  <h2>Primary Source</h2>
+  <p><a href="https://fastapi.tiangolo.com/tutorial/bigger-applications/" target="_blank">FastAPI — Bigger Applications</a>: the official guide to the layered module structure (routers, services, schemas, models) used in this codebase. Read the "APIRouter" and "Dependencies" sections.</p>
+</section>
+
+<div class="ask">
+  <strong>Questions?</strong> Ask your teacher anything — "why not gRPC?", "explain the middleware order", "what does expire_on_commit=False do?" — anything at all.
+</div>
+
+<script src="../assets/quiz.js"></script>
+</body>
+</html>

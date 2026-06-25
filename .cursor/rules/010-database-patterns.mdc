@@ -1,0 +1,197 @@
+---
+description: PostgreSQL and Redis patterns — SQLAlchemy 2.0 Session/select() usage, ORM models, Alembic migrations, cache decorator, Redis pool access. Apply when editing database, cache, or service files.
+globs: "app/core/database/**/*.py,app/core/cache/**/*.py,app/api/**/services.py,app/api/**/models.py"
+alwaysApply: false
+---
+
+# Database & Cache Patterns
+
+## PostgreSQL via SQLAlchemy 2.0 (sync ORM)
+
+`app/core/database/postgres.py` provides `engine`, `SessionLocal`, `Base`, and the
+`get_session()` FastAPI dependency. Services accept a `db: Session` and use the
+SQLAlchemy 2.0 `select()` API. Never open your own engine/session in service code.
+
+```python
+from sqlalchemy import select, func
+from sqlalchemy.orm import Session
+
+from app.api.v1.books.models import Book
+from app.core.exceptions import NotFoundError
+
+# Single row by PK — returns the object or None
+book = db.get(Book, book_id)
+if book is None:
+    raise NotFoundError(f"book {book_id} not found")
+
+# List of rows
+books = db.scalars(
+    select(Book).order_by(Book.created_at.desc()).offset(skip).limit(limit)
+).all()
+
+# Scalar count for pagination totals
+total = db.scalar(select(func.count()).select_from(Book))
+
+# Insert
+book = Book(title="Dune", author="Herbert", isbn="978-0441013593", total_copies=3, available_copies=3)
+db.add(book)
+db.commit()
+db.refresh(book)          # populate server-generated id / created_at
+
+# Update — mutate the attached object, then commit
+book.available_copies -= 1
+db.commit()
+
+# Delete
+db.delete(book)
+db.commit()
+```
+
+`get_session()` commits on success and rolls back on error, so a service that finishes
+without raising will have its work persisted; a service that raises an `AppError` triggers
+rollback. Calling `db.commit()` explicitly inside a service (as above) is fine and required
+when you need the generated PK before returning.
+
+## The Library Schema (normalized, integer PKs)
+
+```
+members(id PK, name, email UNIQUE, phone, address, is_active, created_at, updated_at)
+books(id PK, title, author, isbn UNIQUE, publisher, published_year, genre,
+      total_copies, available_copies, created_at, updated_at)
+loans(id PK, book_id FK→books, member_id FK→members, borrowed_at, due_date,
+      returned_at NULL, status[active|returned|overdue], fine_amount, created_at, updated_at)
+```
+
+- `members` 1—N `loans`; `books` 1—N `loans`.
+- `due_date = borrowed_at + 14 days`.
+- A loan is **overdue** when `returned_at IS NULL AND due_date < now`.
+
+## ORM Model Definition (SQLAlchemy 2.0 Mapped)
+
+```python
+from datetime import datetime
+from sqlalchemy import ForeignKey, String, func
+from sqlalchemy.orm import Mapped, mapped_column, relationship
+
+from app.core.database.postgres import Base
+
+
+class Book(Base):
+    __tablename__ = "books"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    title: Mapped[str] = mapped_column(String(255))
+    author: Mapped[str] = mapped_column(String(255))
+    isbn: Mapped[str] = mapped_column(String(20), unique=True)
+    total_copies: Mapped[int] = mapped_column(default=1)
+    available_copies: Mapped[int] = mapped_column(default=1)
+    created_at: Mapped[datetime] = mapped_column(server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(server_default=func.now(), onupdate=func.now())
+
+    loans: Mapped[list["Loan"]] = relationship(back_populates="book")
+
+
+class Loan(Base):
+    __tablename__ = "loans"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    book_id: Mapped[int] = mapped_column(ForeignKey("books.id"))
+    member_id: Mapped[int] = mapped_column(ForeignKey("members.id"))
+    returned_at: Mapped[datetime | None] = mapped_column(default=None)
+    status: Mapped[str] = mapped_column(String(16), default="active")
+
+    book: Mapped["Book"] = relationship(back_populates="loans")
+```
+
+## Atomic Borrow / Return
+
+Borrow and return mutate `available_copies` and a loan row together — they must be **atomic**.
+Do all the work in one `Session` and let the single `commit()` be the transaction boundary.
+Lock the book row so two concurrent borrows can't both decrement past zero.
+
+```python
+def borrow_book(db: Session, book_id: int, member_id: int) -> Loan:
+    book = db.scalar(select(Book).where(Book.id == book_id).with_for_update())
+    if book is None:
+        raise NotFoundError(f"book {book_id} not found")
+    if db.get(Member, member_id) is None:
+        raise NotFoundError(f"member {member_id} not found")
+    if book.available_copies == 0:
+        raise ConflictError("no copies available")
+
+    book.available_copies -= 1
+    loan = Loan(book_id=book_id, member_id=member_id, status="active")
+    db.add(loan)
+    db.commit()              # single atomic transaction: decrement + insert loan
+    db.refresh(loan)
+    return loan
+```
+
+Returning an already-returned loan → `ConflictError(409)`.
+
+## Alembic Migrations
+
+Schema changes are **never** applied by hand — every model change ships with a migration.
+
+```bash
+make migration m="add loans table"   # autogenerate a revision
+make migrate                          # apply pending migrations (alembic upgrade head)
+```
+
+Review the autogenerated revision before committing — Alembic can miss server defaults,
+column renames, and constraint changes.
+
+## Optional Generic CRUD Base
+
+`app/core/database/repository.py` provides a generic CRUD base parameterized over a model
+class. Use it for plain create/read/update/delete; drop down to hand-written `select()`
+statements for joins, aggregates, or row locking (e.g. borrow/return).
+
+## ORM → Response Mapping
+
+Response schemas declare `model_config = ConfigDict(from_attributes=True)`, so an ORM object
+serializes directly — return the model from the service and let the route's `response_model`
+handle it. Never include sensitive columns (e.g. `members.hashed_password` if present) in a
+response schema.
+
+## Redis Cache Decorator
+
+```python
+from app.core.cache.redis_cache import redis_cache_response
+from fastapi import Request
+
+@router.get("/")
+@redis_cache_response(ttl=120, cache_key_prefix="book_list")
+def list_books(request: Request, page: int = 1, ...):
+    # Rules:
+    # 1. request must be first positional argument
+    # 2. Cache key is scoped to authenticated user automatically
+    # 3. Payloads >4KB are zlib-compressed transparently
+    # 4. TTL has ±10% jitter to prevent stampede
+```
+
+Per-prefix TTLs live in `_CACHE_TTL_MAP` in `redis_cache.py` and `Settings._CACHE_TTL_DEFAULTS`
+in `config.py`. `resolve_ttl(prefix, default)` picks the configured TTL.
+
+## Cache Key Helper
+
+`cache_key(prefix, *parts)` takes **positional** parts (not keyword args):
+
+```python
+from app.core.database.redis import cache_key
+
+key = cache_key("book_list", user_id, str(page))   # → "app:book_list:{user_id}:{page}"
+```
+
+## Connection Lifecycle
+
+The SQLAlchemy `engine` and Redis pools are created in `app/main.py` lifespan — never open or
+dispose them in service code:
+
+```python
+# GOOD — use the injected session
+def list_books(db: Session, ...): ...
+
+# BAD — don't create engines/sessions in services
+engine = create_engine(settings.DATABASE_URL)  # ← don't do this
+```

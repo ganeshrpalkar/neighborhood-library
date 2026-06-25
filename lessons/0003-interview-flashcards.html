@@ -1,0 +1,138 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Lesson 3: Interview Flashcards</title>
+  <link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+
+<nav class="lesson-nav">
+  <a href="0001-system-architecture.html">← Lesson 1</a>
+  <span class="sep">·</span>
+  <a href="0002-concurrency-row-locking.html">← Lesson 2</a>
+  <span class="sep">·</span>
+  <a href="../reference/architecture-cheatsheet.html">Cheat Sheet →</a>
+</nav>
+
+<div class="lesson-tag">Lesson 3 of 3</div>
+<h1>Interview Flashcards</h1>
+<p class="subtitle">15 questions a principal/architect panel will ask — with model answers. Click each card to reveal. If you hesitate on one, go back to Lessons 1 or 2 and then retry.</p>
+
+<div class="flashcard-deck">
+
+  <div class="flashcard">
+    <div class="flashcard-front">Walk me through this system's architecture.</div>
+    <div class="flashcard-back">
+      <p>"This is a REST API for a neighborhood library — books, members, and lending operations. It follows a clean four-layer architecture: SQLAlchemy ORM models sit at the bottom, a pure service layer holds all business logic, Pydantic schemas define request and response shapes, and FastAPI routers handle HTTP concerns only. The hardest invariant to maintain: services never import FastAPI, which keeps them testable in isolation and reusable in Celery tasks or CLI commands. PostgreSQL is the primary store, Redis caches responses, Celery runs background jobs. Deployed to AWS ECS Fargate via Terraform and GitHub Actions."</p>
+    </div>
+  </div>
+
+  <div class="flashcard">
+    <div class="flashcard-front">Why FastAPI instead of Django REST Framework?</div>
+    <div class="flashcard-back">
+      <p>"FastAPI is a better fit for a clean layered service. It gives you Pydantic validation at the system boundary, auto-generated OpenAPI docs, and a Depends() injection system that makes auth, DB sessions, and caching composable without magic. DRF's viewsets and mixins work against strict layer separation — they blend HTTP routing and business logic in ways that make services hard to test in isolation. For a service this size and shape, FastAPI's explicit, type-safe style is the right call."</p>
+    </div>
+  </div>
+
+  <div class="flashcard">
+    <div class="flashcard-front">Why sync SQLAlchemy? Most FastAPI tutorials recommend async.</div>
+    <div class="flashcard-back">
+      <p>"Sync is a deliberate architectural choice here, not a limitation. The primary reason is simpler transaction reasoning — one thread, one transaction, one mental model. Row locking via SELECT FOR UPDATE is natural in synchronous context; in async you'd need careful session scoping to avoid races. Our concurrency model is Gunicorn plus thread workers, which is sufficient for this workload. Async SQLAlchemy adds meaningful complexity without a performance win when the bottleneck is DB I/O latency, not thread pool saturation."</p>
+    </div>
+  </div>
+
+  <div class="flashcard">
+    <div class="flashcard-front">How do you handle concurrent borrows of the last available copy?</div>
+    <div class="flashcard-back">
+      <p>"Pessimistic row locking via PostgreSQL SELECT FOR UPDATE. When a borrow request arrives, we lock the book row immediately on read — any concurrent borrow of the same book queues behind us in PostgreSQL. We check availability, decrement the copy count, insert the loan, and commit — all in one atomic transaction. We also handle IntegrityError as a second defense layer in case a constraint is violated, and the DB has a CHECK constraint on available_copies &gt;= 0 as a third independent layer. Lock ordering (loan row before book row in returns) prevents deadlocks."</p>
+    </div>
+  </div>
+
+  <div class="flashcard">
+    <div class="flashcard-front">Why pessimistic locking and not optimistic locking with a version column?</div>
+    <div class="flashcard-back">
+      <p>"Optimistic locking detects conflicts at commit time and requires the caller to retry. For a library borrow, 'try again' is poor UX — if the last copy is genuinely gone, every retry fails for the same reason. Pessimistic locking queues the concurrent request, and it either succeeds cleanly (if a copy is available) or fails exactly once with a clear reason. The critical section — lock, check, decrement, commit — is pure DB work, milliseconds in practice, so the lock-wait cost is negligible."</p>
+    </div>
+  </div>
+
+  <div class="flashcard">
+    <div class="flashcard-front">Explain your exception handling architecture.</div>
+    <div class="flashcard-back">
+      <p>"There's a domain exception hierarchy rooted at AppError: NotFoundError, ConflictError, AccessDeniedError, ValidationError. Services raise these domain exceptions — never bare HTTPException, never FastAPI-specific types. The app factory registers a single exception handler that maps each type to its HTTP status: 404, 409, 403, 422. This keeps business logic transport-agnostic — the same service layer can be called from an HTTP handler, a Celery task, or a CLI tool without divergent error-handling paths. Unhandled exceptions are caught, logged with correlation ID, and become 500s."</p>
+    </div>
+  </div>
+
+  <div class="flashcard">
+    <div class="flashcard-front">How does your Redis caching work?</div>
+    <div class="flashcard-back">
+      <p>"There's a decorator, <code>@redis_cache_response(ttl=120, cache_key_prefix='book_list')</code>, applied to GET endpoints. The cache key encodes the user scope, HTTP method, path, and a hash of sorted query parameters — so semantically identical requests hit the same key regardless of parameter order. Payloads over 4KB are zlib-compressed automatically. TTL has ±10% random jitter to prevent cache stampede — if thousands of keys expire at exactly the same second, they don't all miss simultaneously. Cache read failures are non-fatal; the decorator falls through to the handler and logs a warning."</p>
+    </div>
+  </div>
+
+  <div class="flashcard">
+    <div class="flashcard-front">Why HS256 JWT? Why not RS256 or refresh tokens?</div>
+    <div class="flashcard-back">
+      <p>"HS256 is appropriate for a single-service deployment. The signing secret stays in one place — you don't distribute a public key. If this were a multi-service system where services needed to verify tokens without the signing secret, RS256 would be the right call: the auth service signs with a private key, other services verify with the public key only and can never forge tokens. No refresh tokens by design — this is a staff-facing tool, not a consumer app. Short expiry (30 minutes) limits the blast radius of a leaked token. The complexity of refresh token rotation isn't justified here."</p>
+    </div>
+  </div>
+
+  <div class="flashcard">
+    <div class="flashcard-front">Walk me through your data model design.</div>
+    <div class="flashcard-back">
+      <p>"Three core tables. Books track <code>total_copies</code> and <code>available_copies</code> — a simple counter inventory that stays consistent because borrow and return mutations are always atomic. Members are library patrons, unique by email. Loans are the junction: book_id + member_id + borrowed_at + due_date + returned_at. Status is derived: active if returned_at is null and within due date, overdue if past due date, returned otherwise. Fine accrues per overdue day and is frozen when the book comes back. The Loan table is indexed on book_id, member_id, and status for efficient filtering. Trigram GIN indexes on book title, author, and member name support fuzzy search."</p>
+    </div>
+  </div>
+
+  <div class="flashcard">
+    <div class="flashcard-front">How are database schema changes managed?</div>
+    <div class="flashcard-back">
+      <p>"Alembic, the standard SQLAlchemy migration tool. When we change a model, we run <code>alembic revision --autogenerate</code>, which diffs the current DB schema against the ORM models and generates a migration script. We always review the generated script — autogenerate misses things like server defaults, custom CHECK constraints, and GIN indexes, which we add manually. In the deployment pipeline, Alembic runs as a one-off ECS task before the rolling service update begins, ensuring the schema is always in sync with the code version being deployed."</p>
+    </div>
+  </div>
+
+  <div class="flashcard">
+    <div class="flashcard-front">Describe your testing strategy. What does each tier catch?</div>
+    <div class="flashcard-back">
+      <p>"Three tiers. Unit tests cover pure business logic — service functions called directly with no DB, no HTTP. They're fast and run in CI on every push. Property-based tests use Hypothesis to fuzz business invariants: things like 'available_copies can never exceed total_copies after any sequence of borrows and returns' — these catch edge cases the developer wouldn't think to write. Contract tests hit a live PostgreSQL and Redis and exercise the full HTTP stack via TestClient. They're the source of truth for actual system behavior — they catch integration bugs that mocks would hide."</p>
+    </div>
+  </div>
+
+  <div class="flashcard">
+    <div class="flashcard-front">What does the Celery worker do?</div>
+    <div class="flashcard-back">
+      <p>"One primary task: <code>flag_overdue_loans</code>. It runs daily via Celery Beat, queries all active loans where <code>due_date &lt; now()</code>, marks them overdue, and recomputes accumulated fines. It's written to be idempotent — safe to run multiple times with no side effects. Celery was chosen over simple cron because it gives distributed task execution, automatic retries on failure, the Flower monitoring UI, and a natural path to adding more async work in the future without infrastructure changes."</p>
+    </div>
+  </div>
+
+  <div class="flashcard">
+    <div class="flashcard-front">How is this deployed to production?</div>
+    <div class="flashcard-back">
+      <p>"Fully automated via GitHub Actions and Terraform. On push to main, Actions authenticates to AWS via OIDC — no static IAM keys stored in GitHub. It builds Docker images for the API and Celery worker, pushes them to ECR, runs Alembic migrations as a one-off ECS task, then performs a rolling deployment of the ECS services with health check gating. The Next.js frontend is a static export deployed to S3 and served via CloudFront. Everything — VPC, ECS Fargate, RDS, ElastiCache, ALB, Route53, ACM certs, Secrets Manager — is declared in Terraform."</p>
+    </div>
+  </div>
+
+  <div class="flashcard">
+    <div class="flashcard-front">How would you scale this system if load increased significantly?</div>
+    <div class="flashcard-back">
+      <p>"Horizontal scaling at the ECS Fargate layer — add API tasks behind the ALB. JWT is stateless so any task handles any request. Redis cache already absorbs most read load. The write path — borrows and returns — is safe under concurrency thanks to row locking. For higher write volume I'd add RDS read replicas and route all GET queries there. At very high scale I'd look at partitioning the loans table by borrowed_at date. The main bottleneck today is the single-writer PostgreSQL, but for a neighborhood library that's a long way off."</p>
+    </div>
+  </div>
+
+  <div class="flashcard">
+    <div class="flashcard-front">What would you do differently if building this system again from scratch?</div>
+    <div class="flashcard-back">
+      <p>"Three things. First, an events table for the loan lifecycle — right now fine history is a single overwritten field; an event log gives better auditability and makes fine recalculation trivial. Second, the roles system is a JSON column — fine now, but a proper permissions table scales better for multi-role or tenant-scoped access control. Third, I over-engineered the Celery setup for what is currently one daily job — APScheduler would have been simpler to operate initially, with Celery as a future upgrade if we needed distributed workers. The async SQLAlchemy question I'm comfortable with — for this access pattern and team size, sync is genuinely the right call."</p>
+    </div>
+  </div>
+
+</div>
+
+<div class="ask">
+  <strong>Questions?</strong> Ask your teacher to drill any of these deeper, throw harder follow-up questions, or run a full mock interview. That's what tomorrow's warmup should look like.
+</div>
+
+<script src="../assets/quiz.js"></script>
+</body>
+</html>

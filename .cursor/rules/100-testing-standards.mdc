@@ -1,0 +1,108 @@
+---
+description: Testing standards — test structure, naming, markers, fixture usage, and what each tier should cover. Apply when writing or reviewing test files.
+globs: "tests/**/*.py,pytest.ini,pyproject.toml"
+alwaysApply: false
+---
+
+# Testing Standards
+
+## Test Tiers
+
+| Tier | Path | DB | Marker | Speed |
+|------|------|-----|--------|-------|
+| Unit | `tests/unit/` | No | — | Fast |
+| Property | `tests/properties/` | No | `@pytest.mark.property` | Fast |
+| Smoke | `tests/test_startup_smoke.py` | No | — | Fast |
+| Contract | `tests/contract/` | PostgreSQL + Redis | `@pytest.mark.contract` | Slow |
+
+## Unit Test Rules
+
+- No DB, no HTTP calls, no file I/O
+- Mock external dependencies with `unittest.mock.MagicMock`
+- One assertion per test when possible
+- Name: `test_{what}_{condition}_{expected}`
+
+```python
+# tests/unit/test_loans_service.py
+def test_borrow_book_decrements_available_copies():
+    from app.api.v1.loans.services import borrow_book
+    from unittest.mock import MagicMock
+    book = MagicMock(available_copies=2)
+    db = MagicMock()
+    db.scalar.return_value = book          # locked book row
+    db.get.return_value = MagicMock()      # member exists
+    borrow_book(db, book_id=1, member_id=1)
+    assert book.available_copies == 1
+    db.commit.assert_called_once()
+```
+
+## Contract Test Rules
+
+- Always start with `docker compose up postgres redis -d`
+- Mark with `@pytest.mark.contract` at module level
+- Mark write operations with `@pytest.mark.mutation`
+- Use `seeded_user` fixture for authenticated requests
+
+```python
+# tests/contract/test_books.py
+import pytest
+pytestmark = pytest.mark.contract
+
+def test_list_books_returns_200(contract_client, seeded_user):
+    resp = contract_client.get("/api/v1/books/", headers=seeded_user["headers"])
+    assert resp.status_code == 200
+    assert "items" in resp.json()
+    assert "total" in resp.json()
+
+@pytest.mark.mutation
+def test_create_book_persists(contract_client, seeded_user):
+    resp = contract_client.post(
+        "/api/v1/books/",
+        json={"title": "Dune", "author": "Herbert", "isbn": "978-0441013593", "total_copies": 3},
+        headers=seeded_user["headers"],
+    )
+    assert resp.status_code == 201
+    book_id = resp.json()["id"]
+    fetch = contract_client.get(f"/api/v1/books/{book_id}", headers=seeded_user["headers"])
+    assert fetch.status_code == 200
+```
+
+## Property Test Rules
+
+```python
+# tests/properties/test_pagination.py
+from hypothesis import given, settings, strategies as st
+import pytest
+
+pytestmark = pytest.mark.property
+
+@given(
+    page=st.integers(min_value=1, max_value=500),
+    page_size=st.integers(min_value=1, max_value=100),
+)
+@settings(max_examples=200)
+def test_skip_is_always_non_negative(page: int, page_size: int):
+    skip = (page - 1) * page_size
+    assert skip >= 0
+```
+
+## What Tests Must Cover for New Endpoints
+
+| Scenario | Tier |
+|----------|------|
+| Happy path (200/201) | Contract |
+| Not found (404) | Contract |
+| Conflict — no copies / double return (409) | Contract |
+| Unauthenticated (401) | Contract |
+| Forbidden (403) | Contract |
+| Service logic (borrow/return atomicity, validation) | Unit |
+| Input shape invariants | Property |
+
+## Running Tests
+
+```bash
+uv run pytest tests/unit/ tests/properties/ -q              # Fast tier
+uv run pytest tests/contract/ -m "contract and not mutation" -q  # Read-only contract
+uv run pytest tests/contract/ -m mutation -q                # Mutation contract
+uv run pytest --cov=app --cov-report=html                   # Full with coverage
+```

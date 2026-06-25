@@ -1,0 +1,20 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(ENABLE_DOCS=true DEBUG=true uv run uvicorn app.main:app --port 8010 --log-level warning)",
+      "Bash(echo \"Backend PID: $!\")",
+      "Bash(curl -s http://localhost:8010/api/v1/health)",
+      "Bash(curl -s http://localhost:8010/)",
+      "Read(//tmp/**)",
+      "Bash(curl -s http://localhost:8010/api/v1/books)",
+      "Bash(sudo docker compose up postgres redis -d)",
+      "Bash(npx skills@latest *)"
+    ]
+  },
+  "enabledMcpjsonServers": [
+    "postgres",
+    "context7",
+    "fetch",
+    "github"
+  ]
+}

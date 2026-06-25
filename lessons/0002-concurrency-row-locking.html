@@ -1,0 +1,250 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Lesson 2: Concurrency &amp; Row Locking</title>
+  <link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+
+<nav class="lesson-nav">
+  <a href="0001-system-architecture.html">← Lesson 1: Architecture</a>
+  <span class="sep">·</span>
+  <a href="0003-interview-flashcards.html">Lesson 3: Flashcards →</a>
+  <span class="sep">·</span>
+  <a href="../reference/architecture-cheatsheet.html">Cheat Sheet</a>
+</nav>
+
+<div class="lesson-tag">Lesson 2 of 3</div>
+<h1>Concurrency &amp; Row Locking</h1>
+<p class="subtitle">The race condition, the fix, and why this is your strongest architectural story for the interview.</p>
+
+<h2>The Problem — A Race Condition</h2>
+<p>Suppose exactly one copy of <em>Dune</em> is available. Two staff members try to borrow it for different members at the same instant. Without concurrency control:</p>
+
+<pre>Request A                         Request B
+─────────────────────────────────────────────────────────
+SELECT available_copies → 1       SELECT available_copies → 1
+copies &gt;= 1?  YES                 copies &gt;= 1?  YES
+available_copies -= 1             available_copies -= 1
+INSERT loan for member 7          INSERT loan for member 9
+COMMIT  (copies = 0)              COMMIT  (copies = -1)  ❌</pre>
+
+<p>Both transactions read <code>available_copies = 1</code> before either one commits. Both proceed. The result: two active loans for one physical book and a negative inventory count — a data integrity violation.</p>
+
+<p>This is a classic <strong>lost update</strong>: two reads interleave before either write, so each transaction acts on stale data.</p>
+
+<h2>The Fix — Pessimistic Row Locking</h2>
+<p>The solution is to lock the book row at read time. PostgreSQL's <code>SELECT … FOR UPDATE</code> says: "I'm reading this row and I intend to modify it — hold an exclusive row lock until I commit or rollback."</p>
+
+<pre>Request A                         Request B
+─────────────────────────────────────────────────────────
+SELECT … FOR UPDATE  → lock ✓
+                                  SELECT … FOR UPDATE  → WAITS 🔒
+available_copies = 1  → OK
+available_copies = 0
+INSERT loan for member 7
+COMMIT  → lock released
+                                  lock acquired
+                                  available_copies = 0
+                                  copies &gt;= 1?  NO  → 409 ConflictError</pre>
+
+<p>Request B queues behind Request A. By the time it acquires the lock the count is already 0, and it correctly rejects the borrow with a 409.</p>
+
+<h2>The Code — borrow_book</h2>
+<p>In <code>app/api/v1/loans/services.py</code>:</p>
+
+<pre>def borrow_book(
+    db: Session, book_id: int, member_id: int,
+    due_date: datetime | None = None,
+) -> Loan:
+
+    # Lock the book row — concurrent borrows of the same book queue here
+    book = db.scalars(
+        select(Book).where(Book.id == book_id).with_for_update()
+    ).first()
+
+    if book is None:
+        raise NotFoundError(f"Book {book_id} not found")
+
+    member = db.get(Member, member_id)
+    if member is None:
+        raise NotFoundError(f"Member {member_id} not found")
+
+    # Safe to check — we own the row lock
+    if book.available_copies &lt; 1:
+        raise ConflictError(f"'{book.title}' has no available copies")
+
+    # Both mutations in one transaction
+    book.available_copies -= 1
+    loan = Loan(
+        book_id=book_id,
+        member_id=member_id,
+        due_date=due_date or (_now() + timedelta(days=settings.LOAN_PERIOD_DAYS)),
+        status="active",
+        fine_amount=0,
+    )
+    db.add(loan)
+
+    try:
+        db.commit()              # book update + loan insert commit together
+    except IntegrityError:       # defense-in-depth: DB constraint violated
+        db.rollback()
+        raise ConflictError(f"'{book.title}' has no available copies")
+
+    db.refresh(loan)
+    return loan</pre>
+
+<h2>The Code — return_loan (Double Lock)</h2>
+<p>Returning a book mutates two rows — the loan and the book's <code>available_copies</code>. We lock both. Consistent lock order (loan first, then book) prevents deadlocks.</p>
+
+<pre>def return_loan(db: Session, loan_id: int) -> Loan:
+
+    # Lock loan first — prevents two concurrent return attempts
+    loan = db.scalars(
+        select(Loan).where(Loan.id == loan_id).with_for_update()
+    ).first()
+
+    if loan is None:
+        raise NotFoundError(f"Loan {loan_id} not found")
+    if loan.returned_at is not None:
+        raise ConflictError("This loan has already been returned")
+
+    now = _now()
+    overdue_days = max(0, (now - loan.due_date).days)
+    loan.returned_at = now
+    loan.status = "returned"
+    loan.fine_amount = round(overdue_days * settings.FINE_PER_DAY, 2)
+
+    # Lock book second — we're incrementing available_copies
+    book = db.scalars(
+        select(Book).where(Book.id == loan.book_id).with_for_update()
+    ).first()
+    if book is not None:
+        book.available_copies = min(book.total_copies, book.available_copies + 1)
+
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        raise ConflictError("This loan has already been returned")
+
+    db.refresh(loan)
+    return loan</pre>
+
+<h2>Defense in Depth — Three Layers</h2>
+<p>Three independent mechanisms guard against inventory corruption. Any one of them is sufficient; together they are very robust:</p>
+
+<table>
+  <thead>
+    <tr><th>Layer</th><th>Mechanism</th><th>What it catches</th></tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><strong>1. Row lock</strong></td>
+      <td><code>SELECT … FOR UPDATE</code></td>
+      <td>Serializes concurrent borrows at the PostgreSQL level — the primary defense</td>
+    </tr>
+    <tr>
+      <td><strong>2. IntegrityError handler</strong></td>
+      <td><code>except IntegrityError</code></td>
+      <td>Any constraint violation the application logic missed — maps it to a clean 409</td>
+    </tr>
+    <tr>
+      <td><strong>3. DB CHECK constraint</strong></td>
+      <td><code>CHECK (available_copies &gt;= 0)</code></td>
+      <td>Absolute last line — PostgreSQL itself rejects negative inventory even if the above two fail</td>
+    </tr>
+  </tbody>
+</table>
+
+<h2>Pessimistic vs Optimistic Locking</h2>
+<p>Optimistic locking (version columns + retry) is a valid alternative. The right choice depends on the conflict rate and the cost of retrying.</p>
+
+<table>
+  <thead>
+    <tr><th>Approach</th><th>Good when…</th><th>Bad when…</th></tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><strong>Pessimistic (FOR UPDATE)</strong></td>
+      <td>Conflicts are plausible; critical section is short (milliseconds)</td>
+      <td>Lock held across a slow operation (e.g., calling an external API mid-transaction)</td>
+    </tr>
+    <tr>
+      <td><strong>Optimistic (version column)</strong></td>
+      <td>Conflicts are genuinely rare; reads vastly outnumber writes</td>
+      <td>High contention — frequent retries frustrate users and waste CPU</td>
+    </tr>
+  </tbody>
+</table>
+
+<p>For library borrows: the critical section is pure DB work (milliseconds), and "please try again" is poor UX when the last copy is truly gone — the retry just fails again. Pessimistic locking is the right call.</p>
+
+<div class="callout">
+  <strong>Interview framing:</strong> "We use pessimistic row locking because borrow operations are fast and conflicts — though rare — are serious. Double-loaning a book is worse than a brief lock wait. We also have IntegrityError handlers as a second layer and DB-level check constraints as a third, so three independent defenses guard against inventory corruption."
+</div>
+
+<!-- QUIZ -->
+<section class="quiz">
+  <h2>Retrieval Practice</h2>
+  <p class="quiz-score"></p>
+
+  <div class="quiz-question" data-correct="c">
+    <p class="quiz-question-text">1. What does <code>.with_for_update()</code> add to the generated SQL?</p>
+    <div class="quiz-options">
+      <button class="quiz-option" data-value="a">An optimistic version check appended before the UPDATE statement</button>
+      <button class="quiz-option" data-value="b">A batched SELECT and UPDATE merged into a single statement</button>
+      <button class="quiz-option" data-value="c">A FOR UPDATE clause that locks matched rows until transaction ends</button>
+      <button class="quiz-option" data-value="d">A SAVEPOINT that allows partial rollback within the transaction</button>
+    </div>
+    <div class="quiz-explanation">SQLAlchemy translates <code>select(Book).with_for_update()</code> to <code>SELECT … FROM books WHERE … FOR UPDATE</code>. PostgreSQL holds a row-level exclusive lock on every matched row until the transaction commits or rolls back.</div>
+  </div>
+
+  <div class="quiz-question" data-correct="b">
+    <p class="quiz-question-text">2. Why handle <code>IntegrityError</code> even though there is already a row lock?</p>
+    <div class="quiz-options">
+      <button class="quiz-option" data-value="a">IntegrityError checking is faster than waiting for the row lock</button>
+      <button class="quiz-option" data-value="b">Defense-in-depth — DB constraints catch violations the lock missed</button>
+      <button class="quiz-option" data-value="c">IntegrityError replaces the row lock in PostgreSQL 14 and above</button>
+      <button class="quiz-option" data-value="d">IntegrityError is the only signal that a book row does not exist</button>
+    </div>
+    <div class="quiz-explanation">The DB has a CHECK constraint <code>available_copies &gt;= 0</code>. If application logic has a bug that allows a negative value, PostgreSQL rejects it with an IntegrityError. We catch it and convert it to a clean 409 instead of leaking a 500 Internal Server Error.</div>
+  </div>
+
+  <div class="quiz-question" data-correct="a">
+    <p class="quiz-question-text">3. In <code>return_loan</code>, what is the lock acquisition order and why does it matter?</p>
+    <div class="quiz-options">
+      <button class="quiz-option" data-value="a">Loan row first, book row second — consistent order prevents deadlocks</button>
+      <button class="quiz-option" data-value="b">Book row first, loan row second — inventory must be locked first</button>
+      <button class="quiz-option" data-value="c">Both rows locked simultaneously inside a single SQL statement</button>
+      <button class="quiz-option" data-value="d">The order varies depending on which lock becomes available first</button>
+    </div>
+    <div class="quiz-explanation">Consistent lock ordering prevents deadlocks. If Transaction A locks Loan then Book, and Transaction B tries to lock Book then Loan, they can deadlock waiting for each other. Always acquiring locks in the same sequence breaks that cycle.</div>
+  </div>
+
+  <div class="quiz-question" data-correct="d">
+    <p class="quiz-question-text">4. Why is pessimistic locking better than optimistic locking for this use case?</p>
+    <div class="quiz-options">
+      <button class="quiz-option" data-value="a">Pessimistic locking is always faster than optimistic locking techniques</button>
+      <button class="quiz-option" data-value="b">Optimistic locking doesn't work correctly on PostgreSQL databases</button>
+      <button class="quiz-option" data-value="c">Pessimistic locking avoids having to add version columns to tables</button>
+      <button class="quiz-option" data-value="d">The lock is brief, and asking callers to retry a failed borrow is bad UX</button>
+    </div>
+    <div class="quiz-explanation">With optimistic locking, the caller must retry when a conflict is detected. For a borrow, "try again" is poor UX — if inventory is truly exhausted, every retry fails for the same reason. Pessimistic locking queues the request and returns exactly one clear outcome: success or a 409 with an explanation.</div>
+  </div>
+</section>
+
+<section class="primary-source">
+  <h2>Primary Source</h2>
+  <p><a href="https://www.postgresql.org/docs/current/explicit-locking.html" target="_blank">PostgreSQL — Explicit Locking</a>: the definitive reference for row-level locking semantics — FOR UPDATE, FOR SHARE, NOWAIT, and SKIP LOCKED. The "Row-Level Locks" section is the relevant one.</p>
+</section>
+
+<div class="ask">
+  <strong>Questions?</strong> Ask anything — "what is SKIP LOCKED and when would you use it?", "when would optimistic locking be better here?", "how does lock escalation work?" — your teacher is here.
+</div>
+
+<script src="../assets/quiz.js"></script>
+</body>
+</html>

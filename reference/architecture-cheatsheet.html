@@ -1,0 +1,154 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Architecture Cheat Sheet</title>
+  <link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+
+<nav class="lesson-nav">
+  <a href="../lessons/0001-system-architecture.html">← Lesson 1</a>
+  <span class="sep">·</span>
+  <a href="../lessons/0002-concurrency-row-locking.html">← Lesson 2</a>
+  <span class="sep">·</span>
+  <a href="../lessons/0003-interview-flashcards.html">← Lesson 3</a>
+</nav>
+
+<div class="lesson-tag">Reference</div>
+<h1>Architecture Cheat Sheet</h1>
+<p class="subtitle">Print this. Review it tonight. Own it tomorrow.</p>
+
+<h2>System at a Glance</h2>
+<div class="diagram">GitHub Actions (OIDC — no static AWS keys)
+  │
+  ├─ Build Docker images → push to ECR
+  ├─ Run Alembic migrations → one-off ECS task
+  └─ Rolling deploy → ECS services
+
+ECS Fargate:
+  ├─ api service    (FastAPI + Gunicorn/Uvicorn, 2+ tasks)
+  └─ worker service (Celery beat + worker, 1 task)
+         │
+  ┌──────┴──────────────────────────┐
+  ▼                                 ▼
+RDS PostgreSQL (multi-AZ)     ElastiCache Redis
+  └─ Alembic migrations          ├─ Response cache (TTL + jitter)
+                                 └─ Celery broker
+
+ALB → api tasks
+Route53 + ACM → HTTPS
+CloudFront → S3 → Next.js frontend (static export)</div>
+
+<h2>The Four-Layer Pattern</h2>
+<table>
+  <thead><tr><th>File</th><th>Responsibility</th><th>Hard Rule</th></tr></thead>
+  <tbody>
+    <tr><td><code>models.py</code></td><td>SQLAlchemy ORM — table definitions, relationships</td><td>No business logic</td></tr>
+    <tr><td><code>services.py</code></td><td>Business logic — takes Session, returns ORM objects</td><td><strong>Never imports FastAPI</strong></td></tr>
+    <tr><td><code>schemas.py</code></td><td>Pydantic DTOs — request and response shapes only</td><td>No DB imports</td></tr>
+    <tr><td><code>router.py</code></td><td>HTTP routing — calls services, formats responses</td><td>No business logic</td></tr>
+  </tbody>
+</table>
+
+<h2>Concurrency Pattern (Borrow)</h2>
+<pre>def borrow_book(db, book_id, member_id):
+    # 1. Lock row — concurrent borrows queue here
+    book = db.scalars(
+        select(Book).where(Book.id == book_id).with_for_update()
+    ).first()
+
+    # 2. Check while holding the lock
+    if book.available_copies &lt; 1:
+        raise ConflictError(...)
+
+    # 3. Mutate + commit atomically
+    book.available_copies -= 1
+    db.add(Loan(...))
+    try:
+        db.commit()
+    except IntegrityError:      # defense-in-depth (layer 2)
+        db.rollback()
+        raise ConflictError(...)
+    # Layer 3: DB CHECK (available_copies >= 0) enforced by PostgreSQL</pre>
+
+<h2>Exception Mapping</h2>
+<table>
+  <thead><tr><th>Domain Exception</th><th>HTTP</th><th>When</th></tr></thead>
+  <tbody>
+    <tr><td><code>NotFoundError</code></td><td>404</td><td>Book / member / loan not found</td></tr>
+    <tr><td><code>ConflictError</code></td><td>409</td><td>No copies available, already returned, duplicate email</td></tr>
+    <tr><td><code>AccessDeniedError</code></td><td>403</td><td>Insufficient role</td></tr>
+    <tr><td><code>ValidationError</code></td><td>422</td><td>Invalid business data (not schema)</td></tr>
+  </tbody>
+</table>
+
+<h2>Data Model</h2>
+<div class="diagram">members              books                     loans
+───────────          ──────────────────────    ──────────────────────────
+id          PK       id              PK        id             PK
+name                 title  (GIN trigram)      book_id        FK → books
+email  UNIQUE        author (GIN trigram)      member_id      FK → members
+phone                isbn    UNIQUE            borrowed_at    (auto now)
+is_active            total_copies              due_date       (now + 14d)
+                     available_copies          returned_at    NULL = active
+                     CHECK copies ≥ 0          status         active/overdue/returned
+                                               fine_amount    Numeric(10,2)</div>
+
+<h2>Key Technology Choices — One-Line Rationale</h2>
+<table>
+  <thead><tr><th>Choice</th><th>Why</th></tr></thead>
+  <tbody>
+    <tr><td>FastAPI (not DRF)</td><td>Explicit layering, auto OpenAPI docs, composable Depends()</td></tr>
+    <tr><td>Sync SQLAlchemy</td><td>Simpler transactions; SELECT FOR UPDATE is natural in sync</td></tr>
+    <tr><td>PostgreSQL</td><td>Row-level locking, trigram GIN indexes, ACID guarantees</td></tr>
+    <tr><td>HS256 JWT</td><td>Single service — symmetric is fine; RS256 for multi-service</td></tr>
+    <tr><td>Redis cache</td><td>Shared across replicas; TTL jitter prevents stampede</td></tr>
+    <tr><td>Celery</td><td>Retries, beat scheduler, Flower monitoring</td></tr>
+    <tr><td>Alembic</td><td>Autogenerate + review migration scripts; runs on deploy</td></tr>
+    <tr><td>Terraform</td><td>Reproducible infra; no manual AWS console in production</td></tr>
+    <tr><td>OIDC (not IAM keys)</td><td>No long-lived secrets in GitHub; role assumed per-deploy</td></tr>
+  </tbody>
+</table>
+
+<h2>Session Dependency (Auto-Commit / Auto-Rollback)</h2>
+<pre>def get_session():
+    session = SessionLocal()
+    try:
+        yield session
+        session.commit()    # success
+    except Exception:
+        session.rollback()  # any error
+        raise
+    finally:
+        session.close()     # always</pre>
+
+<h2>Cache Decorator</h2>
+<pre>@router.get("/")
+@redis_cache_response(ttl=120, cache_key_prefix="book_list")
+def list_books(request: Request, ...):
+    ...
+# Key: {prefix}:{user_scope}:{method}:{path}:{sorted_params_hash}
+# Payloads > 4KB → zlib-compressed
+# TTL jitter ±10% → prevents cache stampede</pre>
+
+<h2>Testing Pyramid</h2>
+<table>
+  <thead><tr><th>Tier</th><th>Command</th><th>Needs DB?</th><th>What it catches</th></tr></thead>
+  <tbody>
+    <tr><td>Unit</td><td><code>make test-unit</code></td><td>No</td><td>Business logic bugs in services</td></tr>
+    <tr><td>Property</td><td><code>make test-property</code></td><td>No</td><td>Invariant violations Hypothesis finds</td></tr>
+    <tr><td>Contract</td><td><code>make test-contract</code></td><td>Yes</td><td>Integration bugs mocks would miss</td></tr>
+  </tbody>
+</table>
+
+<h2>"What Would You Do Differently?"</h2>
+<ul>
+  <li><strong>Events table</strong> for loan lifecycle — fine history is currently a single overwritten field</li>
+  <li><strong>Roles/permissions table</strong> instead of JSON column — better for multi-role or tenant-scoped access</li>
+  <li><strong>APScheduler first, Celery later</strong> — Celery is over-engineered for one daily job at this stage</li>
+</ul>
+
+</body>
+</html>

@@ -1,0 +1,106 @@
+---
+description: JWT authentication patterns — UserContext, auth dependencies, permission guards, token creation. Apply when editing auth, security, or any route that requires authentication.
+globs: "app/core/security/**/*.py,app/api/**/*.py"
+alwaysApply: false
+---
+
+# Auth & JWT Patterns
+
+## Authentication Dependencies
+
+```python
+from app.core.security.jwt import get_current_user, get_optional_user, UserContext
+from app.core.security.permissions import require_admin, require_roles
+
+# Required auth — 401 if no/invalid token
+current_user: UserContext = Depends(get_current_user)
+
+# Optional auth — None if no token, UserContext if valid
+current_user: UserContext | None = Depends(get_optional_user)
+
+# Admin only — 403 if not admin role
+current_user: UserContext = Depends(require_admin())
+
+# Multi-role gate
+current_user: UserContext = Depends(require_roles("librarian", "admin"))
+```
+
+## UserContext Fields
+
+```python
+@dataclass
+class UserContext:
+    user_id: str           # Unique user identifier
+    email: str             # User email
+    roles: list[str]       # e.g. ["admin", "librarian"]
+    is_authenticated: bool = True
+
+    @property
+    def is_admin(self) -> bool:
+        return "admin" in self.roles
+```
+
+## Token Creation (for auth endpoints)
+
+```python
+from app.core.security.jwt import create_access_token, hash_password, verify_password
+
+# Login flow
+hashed = hash_password(plain_password)           # During registration
+valid = verify_password(plain_password, hashed)  # During login
+token = create_access_token(
+    user_id=str(user.id),
+    email=user.email,
+    roles=user.roles,
+)
+```
+
+## Authorization Enforcement in Services
+
+```python
+from sqlalchemy import select
+from sqlalchemy.orm import Session
+
+def cancel_loan(db: Session, loan_id: int, user_id: str) -> Loan:
+    loan = db.get(Loan, loan_id)            # int PK → object | None
+    if loan is None:
+        raise NotFoundError(f"loan {loan_id} not found")
+    if str(loan.member_id) != user_id:
+        raise AccessDeniedError("you do not own this loan")
+    ...
+    db.commit()
+    return loan
+```
+
+**Rule**: authorization checks always in the service layer, never the route layer.
+
+## Password Handling
+
+```python
+# NEVER store or log plain passwords
+# NEVER return hashed_password in API responses
+
+class MemberResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    email: str
+    is_active: bool
+    # hashed_password intentionally excluded
+```
+
+## JWT Config (via settings)
+
+| Setting | Default | Production requirement |
+|---------|---------|----------------------|
+| `JWT_SECRET_KEY` | `change-me-in-production` | Must be overridden (`openssl rand -hex 32`) |
+| `JWT_ALGORITHM` | `HS256` | Do not change |
+| `JWT_EXPIRY_MINUTES` | `30` | 15–120 min range |
+
+## Public Endpoints (no auth required)
+
+These endpoints are intentionally unauthenticated:
+- `GET /api/health` — health check
+- `POST /api/v1/auth/register` — user registration
+- `POST /api/v1/auth/token` — login
+
+All other endpoints MUST have a `Depends(get_current_user)` or equivalent.

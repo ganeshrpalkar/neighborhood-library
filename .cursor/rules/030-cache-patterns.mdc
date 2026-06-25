@@ -1,0 +1,41 @@
+---
+description: Redis cache patterns — @redis_cache_response decorator, cache key conventions, TTL resolution, stampede protection. Apply when editing cache or route files.
+globs: "app/core/cache/**/*.py,app/api/**/*.py"
+alwaysApply: false
+---
+
+# Cache Patterns
+
+## @redis_cache_response Decorator
+
+```python
+from app.core.cache.redis_cache import redis_cache_response
+from fastapi import Request
+
+# `request` MUST be the first positional arg — decorator reads query params from it
+@router.get("/books/{book_id}")
+@redis_cache_response(ttl=300, cache_key_prefix="book_detail")
+def get_book(request: Request, book_id: int, ...):
+    ...
+```
+
+- `cache_key_prefix` must match a prefix in `app/core/warm_cache_constants.py` to get warm-cache TTL; otherwise `ttl` applies
+- Only use on GET endpoints — never on mutation routes
+- TTL is resolved via `resolve_ttl(prefix, default=ttl)`
+
+## Cache Key Rules
+
+- Key = `{prefix}:{hash(sorted query params minus reserved meta-params)}`
+- Add `nocache`-style meta-params to the exclusion list in `_build_cache_key` so they don't create spurious cache misses
+- Never manually construct cache keys outside `_build_cache_key`
+
+## Stampede Protection
+
+The decorator uses a Redis lock before recomputing:
+
+- Lock released only if it was acquired (`lock_acquired` bool in finally block)
+- Never release unconditionally — this would release a lock held by another coroutine
+
+## Redis Connection
+
+Two Redis pools: `REDIS_URL` (default DB, short TTL) and warm-cache prefix uses `resolve_ttl`. Connection lifecycle managed in `app/core/database/`. Read from `settings.REDIS_URL`.
